@@ -1,0 +1,528 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtGui, QtCore
+import requests
+import json
+import traceback
+import ssl
+import urllib3
+
+# Disable SSL warnings - use with caution
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Constants
+DEFAULT_MODEL = "llama3-70b-8192"
+API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+
+class LLMToCADDialog(QtGui.QDialog):
+    def __init__(self):
+        super(LLMToCADDialog, self).__init__()
+        self.setWindowTitle("Groq CAD Generator")
+        self.resize(600, 500)
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # Main layout
+        layout = QtGui.QVBoxLayout(self)
+        
+        # API Key section
+        api_layout = QtGui.QHBoxLayout()
+        api_layout.addWidget(QtGui.QLabel("Groq API Key:"))
+        self.api_key_input = QtGui.QLineEdit()
+        self.api_key_input.setEchoMode(QtGui.QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("Enter your Groq API key")
+        api_layout.addWidget(self.api_key_input)
+        layout.addLayout(api_layout)
+        
+        # Model selection
+        model_layout = QtGui.QHBoxLayout()
+        model_layout.addWidget(QtGui.QLabel("Groq Model:"))
+        self.model_selector = QtGui.QComboBox()
+        self.model_selector.addItems([
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+            "gemma-7b-it"
+        ])
+        self.model_selector.setCurrentIndex(0)  # Default to llama3-70b
+        model_layout.addWidget(self.model_selector)
+        layout.addLayout(model_layout)
+        
+        # Description section
+        layout.addWidget(QtGui.QLabel("CAD Description:"))
+        self.description_input = QtGui.QTextEdit()
+        self.description_input.setPlaceholderText("Describe what you want to create in detail...")
+        layout.addWidget(self.description_input)
+        
+        # Buttons
+        button_layout = QtGui.QHBoxLayout()
+        self.generate_button = QtGui.QPushButton("Generate CAD Model")
+        self.generate_button.clicked.connect(self.generate_model)
+        button_layout.addWidget(self.generate_button)
+        
+        self.debug_checkbox = QtGui.QCheckBox("Enable Debug Mode")
+        button_layout.addWidget(self.debug_checkbox)
+        
+        self.close_button = QtGui.QPushButton("Close")
+        self.close_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
+        
+        # Output log
+        layout.addWidget(QtGui.QLabel("Output:"))
+        self.output_log = QtGui.QTextEdit()
+        self.output_log.setReadOnly(True)
+        layout.addWidget(self.output_log)
+    
+    def generate_model(self):
+        api_key = self.api_key_input.text().strip()
+        description = self.description_input.toPlainText().strip()
+        
+        if not api_key:
+            self.output_log.append("Error: API key is required")
+            return
+            
+        if not description:
+            self.output_log.append("Error: Please provide a description")
+            return
+        
+        try:
+            self.output_log.append("Sending request to Groq...")
+            code = self.get_code_from_groq(api_key, description)
+            
+            if code:
+                self.output_log.append("Code generated. Executing in FreeCAD...")
+                
+                if self.debug_checkbox.isChecked():
+                    success, message = self.execute_code_with_debug(code)
+                else:
+                    success, message = self.execute_code(code)
+                    
+                if success:
+                    self.output_log.append("Success: " + message)
+                else:
+                    self.output_log.append("Error: " + message)
+                    self.output_log.append("Generated code:")
+                    self.output_log.append(code)
+            else:
+                self.output_log.append("Failed to generate code from Groq")
+        except Exception as e:
+            self.output_log.append(f"Error: {str(e)}")
+            self.output_log.append(traceback.format_exc())
+    
+    def get_code_from_groq(self, api_key: str, description: str) -> str:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        system_prompt = "You are a CAD assistant that converts descriptions into FreeCAD Python code. Return ONLY executable Python code with no explanations or markdown formatting. The code should create the specified 3D model in FreeCAD."
+        
+        user_prompt = f"""Create FreeCAD Python code for: {description}
+        
+        The code must:
+        1. Import necessary FreeCAD modules
+        2. Create a new document if needed
+        3. Create the 3D geometry described
+        4. Use parametric modeling when appropriate
+        5. Set reasonable dimensions if not specified
+        6. Add proper colors and appearance
+        7. Be complete and ready to execute
+        
+        Return only the Python code with no explanations or markdown."""
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=60  # Increased timeout
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            code = result["choices"][0]["message"]["content"]
+            
+            # Remove markdown code blocks if present
+            if code.startswith("```python"):
+                code = code.replace("```python", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+            
+            code_to_return = str(code.strip())
+            system_prompt = "You are a CAD assistant that revises FreeCAD Python code from other CAD drafters. Return ONLY executable Python code with no explanations or markdown formatting. The Python code you recieve should be edited to match the original user request."
+
+            user_prompt = f"""Improve the following Python code: 
+	        {code_to_return}
+	        
+	        The original request was to create FreeCAD Python code for: {description}
+	        
+	        The code must:
+	        1. Import necessary FreeCAD modules
+	        2. Create a new document if needed
+	        3. Create the 3D geometry described
+	        4. Use parametric modeling when appropriate
+	        5. Set reasonable dimensions if not specified
+	        6. Add proper colors and appearance
+	        7. Be complete and ready to execute
+	        
+	        Return only the Python code with no explanations or markdown."""
+
+            model = self.model_selector.currentText()
+            
+            data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4000
+        	}
+        	
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            code = result["choices"][0]["message"]["content"]
+            # Remove markdown code blocks if present
+            if code.startswith("```python"):
+                code = code.replace("```python", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+                    
+            return code.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Request error details: {str(e)}")
+            raise
+    
+    def execute_code(self, code: str) -> tuple[bool, str]:
+        try:
+            # Create a new document if none exists
+            if App.ActiveDocument is None:
+                App.newDocument("GroqGenerated")
+            
+            # Execute the code
+            exec(code)
+            
+            # Recompute the document
+            App.ActiveDocument.recompute()
+            Gui.SendMsgToActiveView("ViewFit")
+            
+            return True, "Model created successfully"
+        except Exception as e:
+            return False, f"Failed to execute code: {str(e)}"
+
+    def execute_code_with_debug(self, code: str) -> tuple[bool, str]:
+        """Execute code with debugging and error feedback"""
+        # Store original code for reference
+        original_code = code
+        
+        # Initialize debug information
+        debug_info = {
+            "attempt": 0,
+            "errors": [],
+            "object_state": [],
+            "execution_log": []
+        }
+        
+        max_attempts = 3  # Maximum number of retry attempts
+        
+        for attempt in range(max_attempts):
+            debug_info["attempt"] = attempt + 1
+            
+            try:
+                # Prepare execution environment
+                if App.ActiveDocument is None:
+                    App.newDocument("GroqGenerated")
+                elif attempt > 0:  # Clear previous attempt if this is a retry
+                    doc_name = App.ActiveDocument.Name
+                    App.closeDocument(doc_name)
+                    App.newDocument("GroqGenerated")
+                
+                # Create execution tracking
+                execution_log = []
+                
+                # Split code into lines for line-by-line execution
+                code_lines = code.split('\n')
+                line_num = 0
+                
+                # Execute code line by line
+                while line_num < len(code_lines):
+                    current_line = code_lines[line_num].strip()
+                    
+                    # Skip empty lines and comments
+                    if not current_line or current_line.startswith('#'):
+                        line_num += 1
+                        continue
+                    
+                    # Find complete statements (handling multi-line statements)
+                    statement = current_line
+                    while not self.is_complete_statement(statement) and line_num < len(code_lines) - 1:
+                        line_num += 1
+                        statement += '\n' + code_lines[line_num].strip()
+                    
+                    # Log the statement being executed
+                    execution_log.append(f"Executing: {statement}")
+                    
+                    try:
+                        # Execute the individual statement
+                        exec(statement)
+                        
+                        # Capture object state after significant operations
+                        if any(keyword in statement for keyword in ['makeBox', 'makeCylinder', 'extrude', 'cut', 'fuse']):
+                            self.capture_object_state(debug_info)
+                        
+                    except Exception as e:
+                        # Capture the specific error
+                        error_info = {
+                            "line_num": line_num + 1,
+                            "code": statement,
+                            "error_type": type(e).__name__,
+                            "error_msg": str(e),
+                            "traceback": traceback.format_exc()
+                        }
+                        debug_info["errors"].append(error_info)
+                        
+                        # Log error
+                        execution_log.append(f"Error at line {line_num + 1}: {type(e).__name__}: {str(e)}")
+                        
+                        # Break execution at first error
+                        break
+                    
+                    line_num += 1
+                
+                # Store execution log
+                debug_info["execution_log"] = execution_log
+                
+                # If we got here without breaking, execution was successful
+                if not debug_info["errors"]:
+                    # Final recompute
+                    App.ActiveDocument.recompute()
+                    Gui.SendMsgToActiveView("ViewFit")
+                    return True, "Model created successfully"
+                
+                # If we had errors, try to fix them
+                if attempt < max_attempts - 1:  # Don't try to fix on the last attempt
+                    # Send debug info to Groq for correction
+                    code = self.get_fixed_code_from_groq(original_code, debug_info)
+                    
+                    # Clear errors for next attempt
+                    debug_info["errors"] = []
+                
+            except Exception as e:
+                # Catch any other exceptions
+                debug_info["errors"].append({
+                    "error_type": type(e).__name__,
+                    "error_msg": str(e),
+                    "traceback": traceback.format_exc()
+                })
+        
+        # If we got here, all attempts failed
+        error_summary = self.format_debug_info(debug_info)
+        return False, f"Failed to create model after {max_attempts} attempts.\n\n{error_summary}"
+
+    def is_complete_statement(self, code: str) -> bool:
+        """Check if a code snippet is a complete Python statement"""
+        try:
+            compile(code, '<string>', 'exec')
+            return True
+        except SyntaxError as e:
+            if 'unexpected EOF' in str(e):
+                return False
+            return True  # Other syntax errors mean it's complete but invalid
+
+    def capture_object_state(self, debug_info: dict):
+        """Capture the current state of objects in the document"""
+        if not App.ActiveDocument:
+            return
+        
+        import time
+        objects_info = []
+        for obj in App.ActiveDocument.Objects:
+            try:
+                obj_info = {
+                    "name": obj.Name,
+                    "type": obj.TypeId,
+                    "valid": obj.isValid()
+                }
+                
+                # Capture additional properties based on object type
+                if hasattr(obj, "Shape"):
+                    obj_info["has_shape"] = True
+                    if obj.Shape:
+                        obj_info["shape_valid"] = obj.Shape.isValid()
+                        obj_info["shape_type"] = obj.Shape.ShapeType
+                    else:
+                        obj_info["has_shape"] = False
+                
+                objects_info.append(obj_info)
+            except:
+                # Skip objects that cause errors when examined
+                pass
+        
+        debug_info["object_state"].append({
+            "timestamp": time.time(),
+            "objects": objects_info
+        })
+
+    def get_fixed_code_from_groq(self, original_code: str, debug_info: dict) -> str:
+        """Send debug info to Groq and get fixed code"""
+        # Format debug info for Groq
+        error_context = self.format_debug_info(debug_info)
+        
+        # Create prompt for Groq
+        prompt = f"""I tried to create a FreeCAD model with the following Python code, but encountered errors:
+
+ORIGINAL CODE:
+```python
+{original_code}
+```
+
+EXECUTION DETAILS:
+{error_context}
+
+Please fix the code to resolve these errors. Return only the complete corrected code with no explanations or markdown formatting.
+The code must be valid Python code that works with FreeCAD's API."""
+
+        # Send to Groq
+        fixed_code = self.send_to_groq(prompt)
+        
+        # Log the correction attempt
+        self.output_log.append(f"Attempt {debug_info['attempt']} failed. Trying with corrected code...")
+        
+        return fixed_code
+
+    def format_debug_info(self, debug_info: dict) -> str:
+        """Format debug info into a readable string for UI display and Groq input"""
+        result = []
+        
+        # Add error information
+        if debug_info["errors"]:
+            result.append("ERRORS:")
+            for i, error in enumerate(debug_info["errors"]):
+                result.append(f"Error {i+1}:")
+                if "line_num" in error:
+                    result.append(f"- Line number: {error['line_num']}")
+                if "code" in error:
+                    result.append(f"- Code: {error['code']}")
+                result.append(f"- Type: {error['error_type']}")
+                result.append(f"- Message: {error['error_msg']}")
+                # Include only the relevant parts of the traceback
+                if "traceback" in error:
+                    tb_lines = error["traceback"].split("\n")
+                    filtered_tb = [l for l in tb_lines if "File" in l and "<string>" in l]
+                    if filtered_tb:
+                        result.append("- Traceback:")
+                        result.extend([f"  {l}" for l in filtered_tb])
+                result.append("")
+        
+        # Add execution log (last 10 entries to keep it manageable)
+        if debug_info["execution_log"]:
+            result.append("EXECUTION LOG (last 10 operations):")
+            for log in debug_info["execution_log"][-10:]:
+                result.append(f"- {log}")
+            result.append("")
+        
+        # Add object state info from the last capture
+        if debug_info["object_state"]:
+            last_state = debug_info["object_state"][-1]
+            result.append("OBJECT STATE:")
+            for obj in last_state["objects"]:
+                obj_status = "Valid" if obj.get("valid", False) else "Invalid"
+                result.append(f"- {obj['name']} ({obj['type']}): {obj_status}")
+                if "has_shape" in obj:
+                    if obj["has_shape"]:
+                        shape_status = "Valid" if obj.get("shape_valid", False) else "Invalid"
+                        result.append(f"  Shape: {obj.get('shape_type', 'Unknown')} ({shape_status})")
+                    else:
+                        result.append(f"  Shape: None")
+        
+        return "\n".join(result)
+
+    def send_to_groq(self, prompt: str) -> str:
+        """Send a prompt to the Groq API and get a response"""
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key_input.text()}"
+        }
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a CAD code debugging assistant. Fix FreeCAD Python code based on error information."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=60  # Increased timeout
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            code = result["choices"][0]["message"]["content"]
+            
+            # Remove markdown code blocks if present
+            if code.startswith("```python"):
+                code = code.replace("```python", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+
+            return code.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Request error details: {str(e)}")
+            raise
+
+# Show the dialog when the macro is run
+dialog = LLMToCADDialog()
+dialog.exec_()
+
+# Note: This macro is configured to work with Groq API.
+# Default model is llama3-70b-8192 (as of February 2025).
+# Important configuration notes:
+# 1. The API endpoint is set to "https://api.groq.com/openai/v1/chat/completions"
+# 2. SSL verification is disabled (verify=False) to avoid common SSL errors
+# 3. If the API changes or you encounter errors, you may need to update:
+#    - The API_ENDPOINT constant at the top of the file
+#    - The list of available models in the setup_ui method
+#    - The request format in get_code_from_groq and send_to_groq methods
+# 
+# SECURITY NOTE: Disabling SSL verification (verify=False) reduces security.
+# This is done to work around SSL certificate issues but should be used with caution.
