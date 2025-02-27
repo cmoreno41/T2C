@@ -1,0 +1,153 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtGui, QtCore
+import requests
+import json
+import traceback
+
+class LLMToCADDialog(QtGui.QDialog):
+    def __init__(self):
+        super(LLMToCADDialog, self).__init__()
+        self.setWindowTitle("LLM to CAD Generator")
+        self.resize(600, 500)
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # Main layout
+        layout = QtGui.QVBoxLayout(self)
+        
+        # API Key section
+        api_layout = QtGui.QHBoxLayout()
+        api_layout.addWidget(QtGui.QLabel("API Key:"))
+        self.api_key_input = QtGui.QLineEdit()
+        self.api_key_input.setEchoMode(QtGui.QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("Enter your OpenAI API key")
+        api_layout.addWidget(self.api_key_input)
+        layout.addLayout(api_layout)
+        
+        # Description section
+        layout.addWidget(QtGui.QLabel("CAD Description:"))
+        self.description_input = QtGui.QTextEdit()
+        self.description_input.setPlaceholderText("Describe what you want to create in detail...")
+        layout.addWidget(self.description_input)
+        
+        # Buttons
+        button_layout = QtGui.QHBoxLayout()
+        self.generate_button = QtGui.QPushButton("Generate CAD Model")
+        self.generate_button.clicked.connect(self.generate_model)
+        button_layout.addWidget(self.generate_button)
+        
+        self.close_button = QtGui.QPushButton("Close")
+        self.close_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
+        
+        # Output log
+        layout.addWidget(QtGui.QLabel("Output:"))
+        self.output_log = QtGui.QTextEdit()
+        self.output_log.setReadOnly(True)
+        layout.addWidget(self.output_log)
+    
+    def generate_model(self):
+        api_key = self.api_key_input.text().strip()
+        description = self.description_input.toPlainText().strip()
+        
+        if not api_key:
+            self.output_log.append("Error: API key is required")
+            return
+            
+        if not description:
+            self.output_log.append("Error: Please provide a description")
+            return
+        
+        try:
+            self.output_log.append("Sending request to LLM...")
+            code = self.get_code_from_llm(api_key, description)
+            
+            if code:
+                self.output_log.append("Code generated. Executing in FreeCAD...")
+                success, message = self.execute_code(code)
+                if success:
+                    self.output_log.append("Success: " + message)
+                else:
+                    self.output_log.append("Error: " + message)
+                    self.output_log.append("Generated code:")
+                    self.output_log.append(code)
+            else:
+                self.output_log.append("Failed to generate code from LLM")
+        except Exception as e:
+            self.output_log.append(f"Error: {str(e)}")
+            self.output_log.append(traceback.format_exc())
+    
+    def get_code_from_llm(self, api_key: str, description: str) -> str:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        system_prompt = """You are a CAD assistant that converts descriptions into FreeCAD Python code.
+        Return ONLY executable Python code with no explanations or markdown formatting.
+        The code should create the specified 3D model in FreeCAD."""
+        
+        user_prompt = f"""Create FreeCAD Python code for: {description}
+        
+        The code must:
+        1. Import necessary FreeCAD modules
+        2. Create a new document if needed
+        3. Create the 3D geometry described
+        4. Use parametric modeling when appropriate
+        5. Set reasonable dimensions if not specified
+        6. Add proper colors and appearance
+        7. Be complete and ready to execute
+        
+        Return only the Python code with no explanations or markdown."""
+        
+        data = {
+            "model": "gpt-4",  # Or your preferred model
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2
+        }
+        
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=data
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"API error: {response.text}")
+        
+        result = response.json()
+        code = result["choices"][0]["message"]["content"]
+        
+        # Remove markdown code blocks if present
+        if code.startswith("```python"):
+            code = code.replace("```python", "", 1)
+            if code.endswith("```"):
+                code = code[:-3]
+        
+        return code.strip()
+    
+    def execute_code(self, code: str) -> tuple[bool, str]:
+        try:
+            # Create a new document if none exists
+            if App.ActiveDocument is None:
+                App.newDocument("LLMGenerated")
+            
+            # Execute the code
+            exec(code)
+            
+            # Recompute the document
+            App.ActiveDocument.recompute()
+            Gui.SendMsgToActiveView("ViewFit")
+            
+            return True, "Model created successfully"
+        except Exception as e:
+            return False, f"Failed to execute code: {str(e)}"
+
+# Show the dialog when the macro is run
+dialog = LLMToCADDialog()
+dialog.exec_()
