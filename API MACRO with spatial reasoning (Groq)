@@ -7,6 +7,7 @@ import traceback
 import ssl
 import urllib3
 import sys
+import re
 
 # Disable SSL warnings - use with caution
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -173,7 +174,7 @@ class LLMToCADDialog(QtGui.QDialog):
             lambda: self.spatial_reasoning_output.setVisible(self.show_reasoning_checkbox.isChecked())
         )
         
-        # NEW: Model Feedback Section
+        # Model Feedback Section
         feedback_group = QtGui.QGroupBox("Model Feedback")
         feedback_layout = QtGui.QVBoxLayout(feedback_group)
         
@@ -493,6 +494,14 @@ Please correct the code to address the user's feedback. The corrected code shoul
 7. Handle placements properly with FreeCAD.Placement, FreeCAD.Vector, and FreeCAD.Rotation
 8. Maintain the proper coordinate system (origin at center of bottom face, etc.)
 
+IMPORTANT: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension.
+
+For example, to place a table top (1200mm × 800mm × 30mm) centered at origin:
+- The correct placement is: FreeCAD.Vector(-600, -400, 0)
+- NOT: FreeCAD.Vector(0, 0, 0) which would place the corner at origin
+
 Return ONLY the complete corrected code with no explanations or markdown."""
         
         model = self.model_selector.currentText()
@@ -569,7 +578,11 @@ VERY IMPORTANT: Define a CLEAR coordinate system where:
 - Y-axis defines the width (typically shorter dimension)
 - All measurements must be explicitly defined in millimeters (mm)
 - Use negative z-values for anything below the main component's bottom face
-- Use absolute coordinates for all component positions"""
+- Use absolute coordinates for all component positions
+
+NOTE: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension."""
         
         # Add object-specific instructions
         object_specific = ""
@@ -585,6 +598,10 @@ For tables:
   - Standard dining table height: 750mm
   - Standard coffee table height: 450mm
   - Standard console table height: 750-800mm
+
+REMEMBER: To place the table top with its center at (0,0,0), you must offset its placement
+coordinates by negative half of its dimensions. For a 1200mm × 800mm table top, the placement
+would be (-600, -400, 0) in FreeCAD.
 """
         elif object_type == "chair":
             object_specific = """
@@ -597,6 +614,10 @@ For chairs:
 - Dimensions should follow furniture standards:
   - Standard seat height: 450mm
   - Standard backrest height from floor: 800-950mm
+
+REMEMBER: To place the seat with its center at (0,0,0), you must offset its placement
+coordinates by negative half of its dimensions. For a 500mm × 500mm seat, the placement
+would be (-250, -250, 0) in FreeCAD.
 """
         
         user_prompt = f"""Analyze this object description and provide detailed spatial reasoning:
@@ -618,6 +639,8 @@ Instructions:
 3. Provide explicit (x,y,z) coordinates for ALL components
 4. Identify any symmetries that should be maintained
 5. Note any functional requirements that affect positioning
+6. For each component, clearly state its corner placement coordinates (not center placement)
+   Since FreeCAD places objects by their corner, not their center
 
 Provide your analysis as a structured list of spatial guidelines and constraints.
 Focus ONLY on the spatial relationships, positioning, and constraints."""
@@ -680,7 +703,11 @@ Focus ONLY on the spatial relationships, positioning, and constraints."""
         
         system_prompt = """You are a CAD engineering assistant that specializes in creating precise component plans with exact measurements and coordinates.
 Your task is to create a structured, detailed plan for implementing a 3D model in FreeCAD, based on spatial reasoning guidelines.
-Focus on translating conceptual guidelines into precise numerical specifications that can be directly implemented in code."""
+Focus on translating conceptual guidelines into precise numerical specifications that can be directly implemented in code.
+
+IMPORTANT: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension."""
         
         # Add object-specific templates
         template = ""
@@ -703,27 +730,27 @@ Z-axis: Height (upward)
 
 ## Components
 1. Table Top
-   Position: (0, 0, table_top_thickness/2)
+   Position: (-table_length/2, -table_width/2, 0)
    Dimensions: table_length × table_width × table_top_thickness
    Shape: Box
 
 2. Leg 1 (Front Left)
-   Position: (-table_length/2 + leg_width/2, -table_width/2 + leg_depth/2, -table_height/2)
+   Position: (-table_length/2, -table_width/2, -table_height)
    Dimensions: leg_width × leg_depth × table_height
    Shape: Box
 
 3. Leg 2 (Front Right)
-   Position: (table_length/2 - leg_width/2, -table_width/2 + leg_depth/2, -table_height/2)
+   Position: (table_length/2 - leg_width, -table_width/2, -table_height)
    Dimensions: leg_width × leg_depth × table_height
    Shape: Box
 
 4. Leg 3 (Back Right)
-   Position: (table_length/2 - leg_width/2, table_width/2 - leg_depth/2, -table_height/2)
+   Position: (table_length/2 - leg_width, table_width/2 - leg_depth, -table_height)
    Dimensions: leg_width × leg_depth × table_height
    Shape: Box
 
 5. Leg 4 (Back Left)
-   Position: (-table_length/2 + leg_width/2, table_width/2 - leg_depth/2, -table_height/2)
+   Position: (-table_length/2, table_width/2 - leg_depth, -table_height)
    Dimensions: leg_width × leg_depth × table_height
    Shape: Box
 """
@@ -747,32 +774,32 @@ Z-axis: Height (upward)
 
 ## Components
 1. Seat
-   Position: (0, 0, seat_thickness/2)
+   Position: (-seat_length/2, -seat_width/2, 0)
    Dimensions: seat_length × seat_width × seat_thickness
    Shape: Box
 
 2. Backrest
-   Position: (-seat_length/2 + backrest_thickness/2, 0, (backrest_height/2) + seat_thickness)
+   Position: (-seat_length/2, -seat_width/2, seat_thickness)
    Dimensions: backrest_thickness × seat_width × backrest_height
    Shape: Box
 
 3. Leg 1 (Front Left)
-   Position: (seat_length/2 - leg_width/2, -seat_width/2 + leg_width/2, -seat_height/2)
+   Position: (-seat_length/2, -seat_width/2, -seat_height)
    Dimensions: leg_width × leg_width × seat_height
    Shape: Box
 
 4. Leg 2 (Front Right)
-   Position: (seat_length/2 - leg_width/2, seat_width/2 - leg_width/2, -seat_height/2)
+   Position: (-seat_length/2, seat_width/2 - leg_width, -seat_height)
    Dimensions: leg_width × leg_width × seat_height
    Shape: Box
    
 5. Leg 3 (Back Right)
-   Position: (-seat_length/2 + leg_width/2, seat_width/2 - leg_width/2, -seat_height/2)
+   Position: (seat_length/2 - leg_width, seat_width/2 - leg_width, -seat_height)
    Dimensions: leg_width × leg_width × seat_height
    Shape: Box
    
 6. Leg 4 (Back Left)
-   Position: (-seat_length/2 + leg_width/2, -seat_width/2 + leg_width/2, -seat_height/2)
+   Position: (seat_length/2 - leg_width, -seat_width/2, -seat_height)
    Dimensions: leg_width × leg_width × seat_height
    Shape: Box
 """
@@ -799,6 +826,10 @@ Instructions:
 4. Use ABSOLUTE coordinates matching the coordinate system in the spatial reasoning
 5. Position components logically to maintain functional relationships
 6. Include comments explaining positioning logic where helpful
+
+IMPORTANT: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension.
 
 Format your response as a structured plan that can be directly translated to FreeCAD code."""
 
@@ -881,10 +912,13 @@ throughout the code and NOT 'App'."""
             object_specific_instructions = """
 For tables, your code MUST:
 1. Set the origin (0,0,0) at the CENTER of the BOTTOM FACE of the table top
-2. Position the table top centered at (0, 0, table_top_thickness/2)
-3. Position legs at the corners, extending from z=0 downward to the floor
-4. Define all positions using ABSOLUTE coordinates (not relative/incremental)
-5. Set standard dimensions if not specified:
+2. Position the table top with its bottom face at z=0 and centered
+3. VERY IMPORTANT: When creating a Box, the placement coordinates are for its corner, NOT its center
+4. For a table top with dimensions Length × Width × Height, use:
+   table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
+5. Position legs at the corners, extending from z=0 downward to the floor
+6. Define all positions using ABSOLUTE coordinates (not relative/incremental)
+7. Set standard dimensions if not specified:
    - Standard table height: 750mm
    - Standard top thickness: 30mm
    - Standard leg width: 50mm"""
@@ -892,17 +926,86 @@ For tables, your code MUST:
             object_specific_instructions = """
 For chairs, your code MUST:
 1. Set the origin (0,0,0) at the CENTER of the BOTTOM FACE of the seat
-2. Position the seat centered at (0, 0, seat_thickness/2)
-3. Position legs at the corners, extending from z=0 downward to the floor
-4. Position backrest at the rear edge of the seat, extending upward
-5. Define all positions using ABSOLUTE coordinates (not relative/incremental)
-6. Set standard dimensions if not specified:
+2. Position the seat with its bottom face at z=0 and centered
+3. VERY IMPORTANT: When creating a Box, the placement coordinates are for its corner, NOT its center
+4. For a seat with dimensions Length × Width × Height, use:
+   seat.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
+5. Position legs at the corners, extending from z=0 downward to the floor
+6. Position backrest at the rear edge of the seat, extending upward
+7. Define all positions using ABSOLUTE coordinates (not relative/incremental)
+8. Set standard dimensions if not specified:
    - Standard seat height: 450mm
    - Standard backrest height: 350mm above seat
    - Standard seat thickness: 30mm"""
         
-        # Add validation code if requested
-        validation_code = ""
+        # Updated positioning example with clear explanation
+        default_table_positioning = """
+# Example for CORRECT table positioning:
+# Create table top centered at origin
+table_top = FreeCAD.ActiveDocument.addObject("Part::Box", "TableTop")
+table_top.Length = 1200  # X direction (mm)
+table_top.Width = 800    # Y direction (mm)
+table_top.Height = 30    # Z direction (mm)
+
+# CORRECT: Position so bottom face is at z=0 and center of bottom face is at origin (0,0,0)
+# Since box placement is by corner, we need to offset by negative half of each dimension
+table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-600, -400, 0), FreeCAD.Rotation())
+
+# INCORRECT - this would place the corner at origin, not the center:
+# table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), FreeCAD.Rotation())
+
+# Create legs at corners, extending down from z=0
+leg1 = FreeCAD.ActiveDocument.addObject("Part::Box", "Leg1")
+leg1.Length = 50  # X direction (mm)
+leg1.Width = 50   # Y direction (mm)
+leg1.Height = 720 # Z direction (mm)
+
+# Position at front-left corner, with top of leg at z=0
+# Again using proper corner placement
+leg1.Placement = FreeCAD.Placement(FreeCAD.Vector(-600, -400, -720), FreeCAD.Rotation())
+"""
+        
+        # Determine what specific positioning example to include
+        positioning_example = ""
+        if object_type == "table":
+            positioning_example = default_table_positioning
+        
+        user_prompt = f"""Create FreeCAD Python code for: {description}
+        
+{user_params_text}
+
+{spatial_reasoning_text}
+
+{component_plan_text}
+
+The code must:
+1. Import necessary FreeCAD modules (always import FreeCAD, FreeCADGui, and Part)
+2. Create a new document if needed
+3. Create the 3D geometry described
+4. Position all components correctly according to the spatial reasoning and component plan
+5. Use parametric modeling when appropriate
+6. Set dimensions according to provided parameters
+7. Use reasonable dimensions for parameters not explicitly provided
+8. Add proper colors and appearance
+9. Ensure all components have logical real-world positioning
+10. Define ALL positions using ABSOLUTE coordinates
+11. Be complete and ready to execute
+
+CRITICAL PLACEMENT INFORMATION - READ CAREFULLY:
+- In FreeCAD, when placing Box objects (and most other objects), the placement coordinates refer to
+  the CORNER of the box, NOT its center
+- To place an object with its center at (0,0,0), its placement must be at (-width/2, -length/2, 0)
+- All components must be positioned using this corner-based placement system
+- NEVER use placement coordinates of (0,0,0) for the main component - this incorrectly places
+  the corner at the origin, not the center
+
+{positioning_example}
+
+{object_specific_instructions}
+
+Return only the Python code with no explanations or markdown."""
+
+        # Add validation and visual debug code to prompt if needed
         if self.add_validation_checkbox.isChecked():
             if object_type == "table":
                 validation_code = """
@@ -963,101 +1066,8 @@ def validate_table_positioning():
 # Run validation
 validate_table_positioning()
 """
-            elif object_type == "chair":
-                validation_code = """
-# Add validation code to ensure proper positioning
-def validate_chair_positioning():
-    doc = FreeCAD.ActiveDocument
-    seat = None
-    backrest = None
-    legs = []
-    
-    # Identify components
-    for obj in doc.Objects:
-        if hasattr(obj, "Label"):
-            if "seat" in obj.Label.lower():
-                seat = obj
-            elif "back" in obj.Label.lower():
-                backrest = obj
-            elif "leg" in obj.Label.lower():
-                legs.append(obj)
-    
-    # Check seat positioning
-    if seat:
-        bb = seat.Shape.BoundBox
-        seat_center_z = (bb.ZMin + bb.ZMax) / 2
-        seat_thickness = bb.ZMax - bb.ZMin
-        seat_center_x = (bb.XMin + bb.XMax) / 2
-        seat_center_y = (bb.YMin + bb.YMax) / 2
-        
-        print(f"Validation - Seat:")
-        print(f"  Center: ({seat_center_x:.1f}, {seat_center_y:.1f}, {seat_center_z:.1f}) mm")
-        print(f"  Bottom face z-coordinate: {bb.ZMin:.1f} mm (should be near 0)")
-        
-        # Check if bottom face is at z=0
-        if abs(bb.ZMin) > 1.0:  # 1mm tolerance
-            print(f"  WARNING: Seat bottom face not at z=0")
-    
-    # Check backrest positioning
-    if backrest and seat:
-        bb_back = backrest.Shape.BoundBox
-        bb_seat = seat.Shape.BoundBox
-        
-        back_min_z = bb_back.ZMin
-        
-        print(f"Validation - Backrest:")
-        print(f"  Bottom z-coordinate: {back_min_z:.1f} mm")
-        print(f"  Should connect to seat at approximately {bb_seat.ZMin:.1f} mm")
-        
-        # Check if backrest connects to seat
-        if abs(back_min_z - bb_seat.ZMax) > 1.0 and abs(back_min_z - bb_seat.ZMin) > 1.0:
-            print(f"  WARNING: Backrest does not appear to connect to seat")
-    
-    # Check legs positioning
-    if legs and seat:
-        bb_seat = seat.Shape.BoundBox
-        
-        # Gather leg positions
-        for i, leg in enumerate(legs):
-            bb = leg.Shape.BoundBox
-            top_z = bb.ZMax
-            bottom_z = bb.ZMin
-            
-            print(f"Validation - Leg {i+1}:")
-            print(f"  Top z-coordinate: {top_z:.1f} mm (should be near 0)")
-            print(f"  Bottom z-coordinate: {bottom_z:.1f} mm (should touch floor)")
-            
-            # Check if top of leg connects to bottom of seat
-            if abs(top_z) > 1.0:  # 1mm tolerance
-                print(f"  WARNING: Leg {i+1} top not at z=0")
-
-# Run validation
-validate_chair_positioning()
-"""
-            else:
-                validation_code = """
-# Add generic validation code to check component positioning
-def validate_model_positioning():
-    doc = FreeCAD.ActiveDocument
-    
-    # Report position of all shapes
-    for obj in doc.Objects:
-        if hasattr(obj, "Shape"):
-            bb = obj.Shape.BoundBox
-            center_x = (bb.XMin + bb.XMax) / 2
-            center_y = (bb.YMin + bb.YMax) / 2
-            center_z = (bb.ZMin + bb.ZMax) / 2
-            
-            print(f"Validation - {obj.Label}:")
-            print(f"  Center: ({center_x:.1f}, {center_y:.1f}, {center_z:.1f}) mm")
-            print(f"  Z range: {bb.ZMin:.1f} to {bb.ZMax:.1f} mm")
-
-# Run validation
-validate_model_positioning()
-"""
-        
-        # Include visual debug code if requested
-        visual_debug_code = ""
+                user_prompt += "\n\nAdd this validation code at the end of your implementation:\n" + validation_code
+                
         if self.visual_debug_checkbox.isChecked():
             visual_debug_code = """
 # Add visual debugging indicators
@@ -1100,74 +1110,6 @@ def add_coordinate_system():
 # Add coordinate system indicators
 add_coordinate_system()
 """
-        
-        # Default positioning examples
-        default_table_positioning = """
-# Example for table positioning:
-# - Create table top centered at origin
-table_top = FreeCAD.ActiveDocument.addObject("Part::Box", "TableTop")
-table_top.Length = 1200  # X direction (mm)
-table_top.Width = 800    # Y direction (mm)
-table_top.Height = 30    # Z direction (mm)
-# Position so bottom face is at z=0 and center of bottom face is at origin (0,0,0)
-table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-600, -400, 0), FreeCAD.Rotation())
-
-# - Create legs at corners, extending down from z=0
-leg1 = FreeCAD.ActiveDocument.addObject("Part::Box", "Leg1")
-leg1.Length = 50  # X direction (mm)
-leg1.Width = 50   # Y direction (mm)
-leg1.Height = 720 # Z direction (mm)
-# Position at front-left corner, with top of leg at z=0
-leg1.Placement = FreeCAD.Placement(FreeCAD.Vector(-600+25, -400+25, -720), FreeCAD.Rotation())
-"""
-        
-        # Determine what specific positioning example to include
-        positioning_example = ""
-        if object_type == "table":
-            positioning_example = default_table_positioning
-        
-        user_prompt = f"""Create FreeCAD Python code for: {description}
-        
-{user_params_text}
-
-{spatial_reasoning_text}
-
-{component_plan_text}
-
-The code must:
-1. Import necessary FreeCAD modules (always import FreeCAD, FreeCADGui, and Part)
-2. Create a new document if needed
-3. Create the 3D geometry described
-4. Position all components correctly according to the spatial reasoning and component plan
-5. Use parametric modeling when appropriate
-6. Set dimensions according to provided parameters
-7. Use reasonable dimensions for parameters not explicitly provided
-8. Add proper colors and appearance
-9. Ensure all components have logical real-world positioning
-10. Define ALL positions using ABSOLUTE coordinates
-11. Be complete and ready to execute
-
-IMPORTANT CODE REQUIREMENTS:
-- Always use 'FreeCAD' consistently throughout the code, NOT 'App'
-- For placements, use FreeCAD.Placement, FreeCAD.Vector, and FreeCAD.Rotation
-- Make sure all conditional blocks are properly indented
-- Always check for proper indentation in if/else/for/while blocks
-- Follow the coordinate system where origin (0,0,0) is at the CENTER of the BOTTOM FACE of the main component
-- Z-axis points upward (height)
-- Place the main component (table top, seat, etc.) centered at the origin with its bottom face at z=0
-- For furniture, legs should extend downward from the bottom of the main component (z=0)
-
-{positioning_example}
-
-{object_specific_instructions}
-
-Return only the Python code with no explanations or markdown."""
-
-        # Add validation and visual debug code to prompt if needed
-        if validation_code:
-            user_prompt += "\n\nAdd this validation code at the end of your implementation:\n" + validation_code
-            
-        if visual_debug_code:
             user_prompt += "\n\nAlso add this visual debug code at the end of your implementation:\n" + visual_debug_code
         
         model = self.model_selector.currentText()
@@ -1230,7 +1172,7 @@ Return only the Python code with no explanations or markdown."""
             
         return code
     
-    def execute_code(self, code: str) -> tuple[bool, str]:
+    def execute_code(self, code: str) -> tuple:
         try:
             # Pre-process code to fix common issues
             code = self.preprocess_code(code)
@@ -1262,6 +1204,8 @@ Return only the Python code with no explanations or markdown."""
             return self.fix_table_positioning(code)
         elif "chair" in object_type:
             return self.fix_chair_positioning(code)
+        elif "shelf" in object_type:
+            return self.fix_shelf_positioning(code)
         
         # For other object types, return original code
         return code
@@ -1281,101 +1225,186 @@ Return only the Python code with no explanations or markdown."""
         
     def fix_table_positioning(self, code: str) -> str:
         """Fix positioning issues in table code"""
-        # Look for table top object creation
-        import re
+        # Look for table top object creation and dimensions
+        table_top_obj_match = re.search(r'(\w+)\s*=\s*.*addObject\(.*["\'](?:TableTop|Table_Top|Table)["\'].*\)', code)
         
+        if not table_top_obj_match:
+            return code
+            
+        table_top_name = table_top_obj_match.group(1)
+            
         # Find table top dimensions
-        length_match = re.search(r'(\w+)\.Length\s*=\s*([0-9.]+)', code)
-        width_match = re.search(r'(\w+)\.Width\s*=\s*([0-9.]+)', code)
-        height_match = re.search(r'(\w+)\.Height\s*=\s*([0-9.]+)', code)
+        length_match = re.search(rf'{table_top_name}\.Length\s*=\s*([0-9.]+)', code)
+        width_match = re.search(rf'{table_top_name}\.Width\s*=\s*([0-9.]+)', code)
+        height_match = re.search(rf'{table_top_name}\.Height\s*=\s*([0-9.]+)', code)
         
-        # Find table top object name
-        table_top_name = None
-        if length_match and width_match and height_match:
-            # Check if all matches refer to the same object
-            names = [length_match.group(1), width_match.group(1), height_match.group(1)]
-            if names[0] == names[1] == names[2]:
-                table_top_name = names[0]
-        
-        if not table_top_name:
-            # Try alternative approach - look for table top in object creation
-            top_match = re.search(r'(\w+)\s*=\s*.*addObject\(.*"TableTop"\)', code)
-            if top_match:
-                table_top_name = top_match.group(1)
-            else:
-                # If we can't identify the table top, return original code
-                return code
-        
-        # Get dimensions
-        length = float(length_match.group(2)) if length_match else 1200.0
-        width = float(width_match.group(2)) if width_match else 800.0
-        height = float(height_match.group(2)) if height_match else 30.0
+        # Get dimensions if found
+        length = float(length_match.group(1)) if length_match else 1200.0
+        width = float(width_match.group(1)) if width_match else 800.0
+        height = float(height_match.group(1)) if height_match else 30.0
         
         # Check for table top placement
-        placement_pattern = rf'{table_top_name}\.Placement\s*=\s*.*Vector\((.*?)\)'
-        placement_match = re.search(placement_pattern, code)
+        table_placement_regex = rf'{table_top_name}\.Placement\s*=\s*FreeCAD\.Placement\(FreeCAD\.Vector\(([^,]+),\s*([^,]+),\s*([^)]+)\)(.*)\)'
+        table_placement_match = re.search(table_placement_regex, code)
         
-        if placement_match:
-            # Extract current placement coordinates
-            coords_str = placement_match.group(1)
+        if table_placement_match:
+            x_coord = table_placement_match.group(1).strip()
+            y_coord = table_placement_match.group(2).strip()
+            z_coord = table_placement_match.group(3).strip()
+            rotation = table_placement_match.group(4).strip()
             
-            # Check if it's centered
-            if "0, 0" not in coords_str and "-" not in coords_str:
-                # Create proper placement string for table top centered at origin
-                new_placement = f"{table_top_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{length}/2, -{width}/2, 0), FreeCAD.Rotation())"
+            # Check if it's using (0,0,0) or similar improper positioning
+            try:
+                # Try to evaluate the coordinates as expressions
+                x_val = eval(x_coord)
+                y_val = eval(y_coord)
                 
-                # Replace current placement with corrected one
-                code = re.sub(placement_pattern, new_placement, code)
+                # If coordinates are near zero or positive, they're likely incorrect
+                if abs(x_val) < 1.0 or x_val > 0 or abs(y_val) < 1.0 or y_val > 0:
+                    # Create proper negative half-dimension placement
+                    half_length = length / 2
+                    half_width = width / 2
+                    
+                    # Construct corrected placement
+                    new_placement = f"{table_top_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{half_length}, -{half_width}, {z_coord}){rotation})"
+                    
+                    # Replace the incorrect placement
+                    code = re.sub(table_placement_regex, new_placement, code)
+                    self.output_log.append(f"Fixed table top placement from ({x_coord}, {y_coord}, {z_coord}) to (-{half_length}, -{half_width}, {z_coord})")
+            except Exception as e:
+                # If we can't evaluate the expressions, skip the fix
+                self.output_log.append(f"Could not evaluate table placement coordinates: {str(e)}")
+        else:
+            # If no placement found, add one with proper coordinates
+            after_height_pattern = rf'{table_top_name}\.Height\s*=\s*[0-9.]+\n'
+            after_height_match = re.search(after_height_pattern, code)
+            
+            if after_height_match:
+                # Construct placement with proper coordinates
+                placement_code = f"{table_top_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{length/2}, -{width/2}, 0), FreeCAD.Rotation())\n"
+                
+                # Insert after the height setting
+                insertion_point = after_height_match.end()
+                code = code[:insertion_point] + placement_code + code[insertion_point:]
+                self.output_log.append(f"Added missing table top placement with coordinates (-{length/2}, -{width/2}, 0)")
         
-        # Look for leg positions and fix them if needed
-        leg_pattern = r'(\w+)\s*=\s*.*addObject\(.*"Leg.*"\)'
-        leg_matches = re.finditer(leg_pattern, code)
+        # Look for leg positioning and fix if needed
+        leg_pattern = r'(\w+)\s*=\s*.*addObject\(.*["\'](?:Leg\d*)["\'].*\)'
+        leg_matches = list(re.finditer(leg_pattern, code))
         
         for i, match in enumerate(leg_matches):
             leg_name = match.group(1)
             
+            # Find leg dimensions
+            leg_width_match = re.search(rf'{leg_name}\.(?:Width|Length)\s*=\s*([0-9.]+)', code)
+            leg_width = float(leg_width_match.group(1)) if leg_width_match else 50.0
+            
             # Find leg placement
-            leg_placement_pattern = rf'{leg_name}\.Placement\s*=\s*.*Vector\((.*?)\)'
-            leg_placement_match = re.search(leg_placement_pattern, code)
+            leg_placement_regex = rf'{leg_name}\.Placement\s*=\s*FreeCAD\.Placement\(FreeCAD\.Vector\(([^,]+),\s*([^,]+),\s*([^)]+)\)(.*)\)'
+            leg_placement_match = re.search(leg_placement_regex, code)
             
             if leg_placement_match:
-                # Check if placement uses z=0 or extends from table bottom
-                coords_str = leg_placement_match.group(1)
-                if "750" not in coords_str and "table_height" not in coords_str:
-                    # Determine which corner this leg should be in based on index
-                    if i == 0:  # Front left
-                        new_coords = f"-{length}/2+25, -{width}/2+25, -750"
-                    elif i == 1:  # Front right
-                        new_coords = f"{length}/2-25, -{width}/2+25, -750"
-                    elif i == 2:  # Back right
-                        new_coords = f"{length}/2-25, {width}/2-25, -750"
-                    elif i == 3:  # Back left
-                        new_coords = f"-{length}/2+25, {width}/2-25, -750"
-                    else:
-                        continue
-                        
-                    # Create new placement for leg
-                    new_leg_placement = f"{leg_name}.Placement = FreeCAD.Placement(FreeCAD.Vector({new_coords}), FreeCAD.Rotation())"
+                x_coord = leg_placement_match.group(1).strip()
+                y_coord = leg_placement_match.group(2).strip()
+                z_coord = leg_placement_match.group(3).strip()
+                rotation = leg_placement_match.group(4).strip()
+                
+                # Check if z-coordinate is incorrect (should be negative for legs)
+                try:
+                    z_val = eval(z_coord)
                     
-                    # Replace current placement with corrected one
-                    code = re.sub(leg_placement_pattern, new_leg_placement, code)
+                    # If z is zero or positive, it's probably wrong
+                    if z_val >= 0 and "table_height" not in z_coord and "leg_height" not in z_coord:
+                        # Assume standard table height if not specified
+                        table_height = 750.0
+                        # Use the negative table height
+                        new_z_coord = "-" + str(table_height)
+                        
+                        # Construct corrected placement
+                        new_placement = f"{leg_name}.Placement = FreeCAD.Placement(FreeCAD.Vector({x_coord}, {y_coord}, {new_z_coord}){rotation})"
+                        
+                        # Replace the incorrect placement
+                        code = re.sub(leg_placement_regex, new_placement, code)
+                        self.output_log.append(f"Fixed leg {i+1} z-coordinate from {z_coord} to {new_z_coord}")
+                except Exception as e:
+                    # If we can't evaluate the z-coordinate, skip the fix
+                    self.output_log.append(f"Could not evaluate leg z-coordinate: {str(e)}")
         
         return code
         
     def fix_chair_positioning(self, code: str) -> str:
         """Fix positioning issues in chair code"""
-        # Similar pattern to table positioning fixes, but for chairs
-        # This method would be implemented for chair-specific positioning issues
+        # Look for seat object creation and dimensions
+        seat_obj_match = re.search(r'(\w+)\s*=\s*.*addObject\(.*["\'](?:Seat|Chair_Seat)["\'].*\)', code)
+        
+        if not seat_obj_match:
+            return code
+            
+        seat_name = seat_obj_match.group(1)
+            
+        # Find seat dimensions
+        length_match = re.search(rf'{seat_name}\.Length\s*=\s*([0-9.]+)', code)
+        width_match = re.search(rf'{seat_name}\.Width\s*=\s*([0-9.]+)', code)
+        height_match = re.search(rf'{seat_name}\.Height\s*=\s*([0-9.]+)', code)
+        
+        # Get dimensions if found
+        length = float(length_match.group(1)) if length_match else 500.0
+        width = float(width_match.group(1)) if width_match else 500.0
+        height = float(height_match.group(1)) if height_match else 30.0
+        
+        # Check for seat placement
+        seat_placement_regex = rf'{seat_name}\.Placement\s*=\s*FreeCAD\.Placement\(FreeCAD\.Vector\(([^,]+),\s*([^,]+),\s*([^)]+)\)(.*)\)'
+        seat_placement_match = re.search(seat_placement_regex, code)
+        
+        if seat_placement_match:
+            x_coord = seat_placement_match.group(1).strip()
+            y_coord = seat_placement_match.group(2).strip()
+            z_coord = seat_placement_match.group(3).strip()
+            rotation = seat_placement_match.group(4).strip()
+            
+            # Check if it's using (0,0,0) or similar improper positioning
+            try:
+                # Try to evaluate the coordinates as expressions
+                x_val = eval(x_coord)
+                y_val = eval(y_coord)
+                
+                # If coordinates are near zero or positive, they're likely incorrect
+                if abs(x_val) < 1.0 or x_val > 0 or abs(y_val) < 1.0 or y_val > 0:
+                    # Create proper negative half-dimension placement
+                    half_length = length / 2
+                    half_width = width / 2
+                    
+                    # Construct corrected placement
+                    new_placement = f"{seat_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{half_length}, -{half_width}, {z_coord}){rotation})"
+                    
+                    # Replace the incorrect placement
+                    code = re.sub(seat_placement_regex, new_placement, code)
+                    self.output_log.append(f"Fixed seat placement from ({x_coord}, {y_coord}, {z_coord}) to (-{half_length}, -{half_width}, {z_coord})")
+            except Exception as e:
+                # If we can't evaluate the expressions, skip the fix
+                self.output_log.append(f"Could not evaluate seat placement coordinates: {str(e)}")
+                
+        # Similar checks and fixes for backrest and legs would go here
+        
+        return code
+        
+    def fix_shelf_positioning(self, code: str) -> str:
+        """Fix positioning issues in shelf code"""
+        # Implementation would be similar to the table and chair methods
+        # This method would fix positioning issues specific to shelves
         return code
 
     def execute_code_with_debug(self, code: str, object_type: str, user_params: dict = None, 
-                               spatial_reasoning: str = None, component_plan: str = None) -> tuple[bool, str]:
+                               spatial_reasoning: str = None, component_plan: str = None) -> tuple:
         """Execute code with debugging and error feedback"""
         # Store original code for reference
         original_code = code
         
         # Pre-process code to fix common issues
         code = self.preprocess_code(code)
+        
+        # Fix positioning issues
+        code = self.fix_positioning_issues(code)
         
         # Initialize debug information
         debug_info = {
@@ -1587,7 +1616,9 @@ Return only the Python code with no explanations or markdown."""
             object_specific = """
 VERY IMPORTANT POSITIONING REQUIREMENTS:
 1. Table top must be positioned with its bottom face at z=0
-2. Table top must be centered at (0, 0, table_top_thickness/2)
+2. CRITICAL: Place table top using CORNER coordinates, not center coordinates
+   - For a table with dimensions Length × Width, use:
+   - table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
 3. Legs must extend downward from z=0 (they must connect to the bottom of the table top)
 4. Legs must be positioned at the corners of the table
 5. All positions must use ABSOLUTE coordinates (not relative/incremental)"""
@@ -1595,7 +1626,9 @@ VERY IMPORTANT POSITIONING REQUIREMENTS:
             object_specific = """
 VERY IMPORTANT POSITIONING REQUIREMENTS:
 1. Seat must be positioned with its bottom face at z=0
-2. Seat must be centered at (0, 0, seat_thickness/2)
+2. CRITICAL: Place seat using CORNER coordinates, not center coordinates
+   - For a seat with dimensions Length × Width, use:
+   - seat.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
 3. Legs must extend downward from z=0 (they must connect to the bottom of the seat)
 4. Backrest must connect to the back edge of the seat and extend upward
 5. All positions must use ABSOLUTE coordinates (not relative/incremental)"""
@@ -1624,7 +1657,10 @@ CRITICAL FIXES NEEDED:
 3. For placements, use FreeCAD.Placement, FreeCAD.Vector, and FreeCAD.Rotation
 4. Fix any indentation issues, especially in conditional blocks
 5. Ensure all imports are present: import FreeCAD, import FreeCADGui, import Part
-6. Ensure components have proper ABSOLUTE positioning
+6. MOST IMPORTANT: Fix component positioning - remember that in FreeCAD:
+   - Box placement coordinates are for the CORNER, not center
+   - To place a box centered at origin, use negative half-dimensions
+   - For a box with Length=1200, Width=800, use Placement(-600, -400, 0)
 7. Ensure components maintain logical real-world relationships
 8. For furniture, ensure supporting elements (legs) properly connect to main elements
 9. Maintain the coordinate system where origin (0,0,0) is at the center of the bottom face of the main component
