@@ -83,11 +83,10 @@ class LLMToCADDialog(QtGui.QDialog):
         param_group_layout.addWidget(scroll_area)
         layout.addWidget(param_group)
         
-        # Advanced options section
-        advanced_group = QtGui.QGroupBox("Advanced Options")
-        advanced_layout = QtGui.QVBoxLayout(advanced_group)
-        
         # LLM Spatial Reasoning
+        self.spatial_reasoning_group = QtGui.QGroupBox("AI Spatial Reasoning")
+        spatial_reasoning_layout = QtGui.QVBoxLayout(self.spatial_reasoning_group)
+        
         reasoning_options = QtGui.QHBoxLayout()
         self.spatial_reasoning_checkbox = QtGui.QCheckBox("Enable AI Spatial Reasoning")
         self.spatial_reasoning_checkbox.setChecked(True)
@@ -96,58 +95,17 @@ class LLMToCADDialog(QtGui.QDialog):
         self.show_reasoning_checkbox = QtGui.QCheckBox("Show Reasoning")
         self.show_reasoning_checkbox.setChecked(False)
         reasoning_options.addWidget(self.show_reasoning_checkbox)
-        
-        self.component_plan_checkbox = QtGui.QCheckBox("Generate Component Plan")
-        self.component_plan_checkbox.setChecked(True)
-        reasoning_options.addWidget(self.component_plan_checkbox)
-        
         reasoning_options.addStretch()
-        advanced_layout.addLayout(reasoning_options)
+        spatial_reasoning_layout.addLayout(reasoning_options)
         
-        # Debug options
-        debug_options = QtGui.QHBoxLayout()
-        self.debug_checkbox = QtGui.QCheckBox("Debug Mode")
-        debug_options.addWidget(self.debug_checkbox)
-        
-        self.visual_debug_checkbox = QtGui.QCheckBox("Visual Debug")
-        self.visual_debug_checkbox.setChecked(True)
-        debug_options.addWidget(self.visual_debug_checkbox)
-        
-        self.add_validation_checkbox = QtGui.QCheckBox("Add Validation Code")
-        self.add_validation_checkbox.setChecked(True)
-        debug_options.addWidget(self.add_validation_checkbox)
-        
-        debug_options.addStretch()
-        advanced_layout.addLayout(debug_options)
-        
-        # Object type selection
-        object_type_layout = QtGui.QHBoxLayout()
-        object_type_layout.addWidget(QtGui.QLabel("Object Type:"))
-        self.object_type_selector = QtGui.QComboBox()
-        self.object_type_selector.addItems([
-            "Auto-detect",
-            "Table",
-            "Chair",
-            "Shelf",
-            "Cabinet",
-            "Desk",
-            "Bed",
-            "Other"
-        ])
-        self.object_type_selector.setCurrentIndex(0)  # Default to auto-detect
-        object_type_layout.addWidget(self.object_type_selector)
-        object_type_layout.addStretch()
-        advanced_layout.addLayout(object_type_layout)
-        
-        layout.addWidget(advanced_group)
-        
-        # Spatial reasoning output
         self.spatial_reasoning_output = QtGui.QTextEdit()
         self.spatial_reasoning_output.setReadOnly(True)
         self.spatial_reasoning_output.setPlaceholderText("AI spatial reasoning will appear here when generation starts...")
         self.spatial_reasoning_output.setMaximumHeight(100)
         self.spatial_reasoning_output.setVisible(False)
-        layout.addWidget(self.spatial_reasoning_output)
+        spatial_reasoning_layout.addWidget(self.spatial_reasoning_output)
+        
+        layout.addWidget(self.spatial_reasoning_group)
         
         # Connect show reasoning checkbox to visibility
         self.show_reasoning_checkbox.stateChanged.connect(
@@ -159,6 +117,9 @@ class LLMToCADDialog(QtGui.QDialog):
         self.generate_button = QtGui.QPushButton("Generate CAD Model")
         self.generate_button.clicked.connect(self.generate_model)
         button_layout.addWidget(self.generate_button)
+        
+        self.debug_checkbox = QtGui.QCheckBox("Enable Debug Mode")
+        button_layout.addWidget(self.debug_checkbox)
         
         self.close_button = QtGui.QPushButton("Close")
         self.close_button.clicked.connect(self.reject)
@@ -224,31 +185,6 @@ class LLMToCADDialog(QtGui.QDialog):
                 parameters[name] = value
         return parameters
     
-    def get_object_type(self, description: str) -> str:
-        """Determine the object type either from selector or by analyzing description"""
-        selected_type = self.object_type_selector.currentText()
-        
-        if selected_type != "Auto-detect":
-            return selected_type.lower()
-        
-        # Simple keyword detection for auto-detection
-        description_lower = description.lower()
-        
-        if any(word in description_lower for word in ["table", "dining", "coffee table"]):
-            return "table"
-        elif any(word in description_lower for word in ["chair", "stool"]):
-            return "chair"
-        elif any(word in description_lower for word in ["shelf", "bookshelf", "shelving"]):
-            return "shelf"
-        elif any(word in description_lower for word in ["cabinet", "dresser", "wardrobe"]):
-            return "cabinet"
-        elif any(word in description_lower for word in ["desk", "workstation"]):
-            return "desk"
-        elif any(word in description_lower for word in ["bed", "bedframe"]):
-            return "bed"
-        
-        return "other"
-    
     def generate_model(self):
         api_key = self.api_key_input.text().strip()
         description = self.description_input.toPlainText().strip()
@@ -264,18 +200,12 @@ class LLMToCADDialog(QtGui.QDialog):
         try:
             # Get user-defined spatial parameters
             user_params = self.get_spatial_parameters()
-            
-            # Determine object type
-            object_type = self.get_object_type(description)
-            self.output_log.append(f"Detected object type: {object_type}")
-            
             spatial_reasoning = None
-            component_plan = None
             
             # Generate spatial reasoning if enabled
             if self.spatial_reasoning_checkbox.isChecked():
                 self.output_log.append("Generating spatial reasoning...")
-                spatial_reasoning = self.generate_spatial_reasoning(api_key, description, object_type, user_params)
+                spatial_reasoning = self.generate_spatial_reasoning(api_key, description, user_params)
                 
                 if not spatial_reasoning:
                     self.output_log.append("Warning: Failed to generate spatial reasoning. Continuing without it.")
@@ -286,25 +216,15 @@ class LLMToCADDialog(QtGui.QDialog):
                         self.spatial_reasoning_output.setText(spatial_reasoning)
                     self.output_log.append("Spatial reasoning completed.")
             
-            # Generate component plan if enabled
-            if self.component_plan_checkbox.isChecked() and spatial_reasoning:
-                self.output_log.append("Generating component plan...")
-                component_plan = self.generate_component_plan(api_key, description, object_type, spatial_reasoning, user_params)
-                
-                if not component_plan:
-                    self.output_log.append("Warning: Failed to generate component plan. Continuing without it.")
-                else:
-                    self.output_log.append("Component plan completed.")
-            
             # Generate CAD code
             self.output_log.append("Sending request to Groq for CAD code generation...")
-            code = self.get_code_from_groq(api_key, description, object_type, user_params, spatial_reasoning, component_plan)
+            code = self.get_code_from_groq(api_key, description, user_params, spatial_reasoning)
             
             if code:
                 self.output_log.append("Code generated. Executing in FreeCAD...")
                 
                 if self.debug_checkbox.isChecked():
-                    success, message = self.execute_code_with_debug(code, object_type, user_params, spatial_reasoning, component_plan)
+                    success, message = self.execute_code_with_debug(code, user_params, spatial_reasoning)
                 else:
                     success, message = self.execute_code(code)
                     
@@ -320,7 +240,7 @@ class LLMToCADDialog(QtGui.QDialog):
             self.output_log.append(f"Error: {str(e)}")
             self.output_log.append(traceback.format_exc())
     
-    def generate_spatial_reasoning(self, api_key: str, description: str, object_type: str, user_params: dict = None) -> str:
+    def generate_spatial_reasoning(self, api_key: str, description: str, user_params: dict = None) -> str:
         """Generate logical spatial relationships for the described object"""
         headers = {
             "Content-Type": "application/json",
@@ -336,70 +256,28 @@ class LLMToCADDialog(QtGui.QDialog):
         
         system_prompt = """You are a CAD engineering assistant with extensive knowledge of 3D modeling and real-world objects.
 Your task is to analyze a description and provide detailed spatial reasoning about how components should be logically arranged.
-Focus on identifying key components and their proper spatial relationships.
-
-VERY IMPORTANT: Define a CLEAR coordinate system where:
-- The origin (0,0,0) is at the CENTER of the BOTTOM FACE of the main component (e.g., table top)
-- Z-axis points upward (height)
-- X-axis defines the length (typically longer dimension) 
-- Y-axis defines the width (typically shorter dimension)
-- All measurements must be explicitly defined in millimeters (mm)
-- Use negative z-values for anything below the main component's bottom face
-- Use absolute coordinates for all component positions"""
-        
-        # Add object-specific instructions
-        object_specific = ""
-        if object_type == "table":
-            object_specific = """
-For tables:
-- Table top origin should be at (0,0,0) at the center of its bottom face
-- Table top extends along +Z by its thickness
-- Table legs should extend downward from z=0 to z=-table_height
-- Legs should be positioned at the corners of the table
-- Calculate exact coordinates for all four legs
-- Dimensions should follow furniture standards:
-  - Standard dining table height: 750mm
-  - Standard coffee table height: 450mm
-  - Standard console table height: 750-800mm
-"""
-        elif object_type == "chair":
-            object_specific = """
-For chairs:
-- Seat origin should be at (0,0,0) at the center of its bottom face
-- Seat extends along +Z by its thickness
-- Legs should extend downward from z=0 to z=-seat_height
-- Backrest should extend upward from the back edge of the seat
-- Calculate exact coordinates for all legs and the backrest
-- Dimensions should follow furniture standards:
-  - Standard seat height: 450mm
-  - Standard backrest height from floor: 800-950mm
-"""
+Focus on identifying key components and their proper spatial relationships."""
         
         user_prompt = f"""Analyze this object description and provide detailed spatial reasoning:
 
 DESCRIPTION:
 {description}
 
-OBJECT TYPE: {object_type}
-
 {user_params_text}
 
 Instructions:
 1. Identify the main object and all its key components
 2. For each component, determine:
-   - Its proper position using EXACT ABSOLUTE COORDINATES with the origin as specified
+   - Its proper position relative to other components
    - Its proper orientation (which way is up, front, etc.)
    - Any logical constraints (e.g., legs must touch the ground)
-   - EXACT dimensions in millimeters (mm)
-3. Provide explicit (x,y,z) coordinates for ALL components
+   - Important dimensions and their relationships (e.g., legs should be equal height)
+3. Provide explicit coordinates when helpful (use a logical origin point)
 4. Identify any symmetries that should be maintained
-5. Note any functional requirements that affect positioning
+5. Note any functional requirements that affect positioning (e.g., drawer must have clearance to open)
 
 Provide your analysis as a structured list of spatial guidelines and constraints.
 Focus ONLY on the spatial relationships, positioning, and constraints."""
-
-        if object_specific:
-            user_prompt += f"\n\n{object_specific}"
         
         model = self.model_selector.currentText()
         
@@ -437,184 +315,7 @@ Focus ONLY on the spatial relationships, positioning, and constraints."""
             self.output_log.append(f"Spatial reasoning error: {str(e)}")
             return None
     
-    def generate_component_plan(self, api_key: str, description: str, object_type: str, spatial_reasoning: str, user_params: dict = None) -> str:
-        """Generate a specific component plan with exact coordinates and dimensions"""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-        
-        # Construct user parameters text if available
-        user_params_text = ""
-        if user_params and len(user_params) > 0:
-            user_params_text = "User-defined parameters:\n"
-            for name, value in user_params.items():
-                user_params_text += f"- {name}: {value}\n"
-        
-        system_prompt = """You are a CAD engineering assistant that specializes in creating precise component plans with exact measurements and coordinates.
-Your task is to create a structured, detailed plan for implementing a 3D model in FreeCAD, based on spatial reasoning guidelines.
-Focus on translating conceptual guidelines into precise numerical specifications that can be directly implemented in code."""
-        
-        # Add object-specific templates
-        template = ""
-        if object_type == "table":
-            template = """
-# TABLE COMPONENT PLAN
-## Parameters
-table_length = ? mm
-table_width = ? mm
-table_height = ? mm
-table_top_thickness = ? mm
-leg_width = ? mm
-leg_depth = ? mm
-
-## Coordinate System
-Origin: Center of bottom face of table top
-X-axis: Length direction
-Y-axis: Width direction
-Z-axis: Height (upward)
-
-## Components
-1. Table Top
-   Position: (0, 0, table_top_thickness/2)
-   Dimensions: table_length × table_width × table_top_thickness
-   Shape: Box
-
-2. Leg 1 (Front Left)
-   Position: (-table_length/2 + leg_width/2, -table_width/2 + leg_depth/2, -table_height/2)
-   Dimensions: leg_width × leg_depth × table_height
-   Shape: Box
-
-3. Leg 2 (Front Right)
-   Position: (table_length/2 - leg_width/2, -table_width/2 + leg_depth/2, -table_height/2)
-   Dimensions: leg_width × leg_depth × table_height
-   Shape: Box
-
-4. Leg 3 (Back Right)
-   Position: (table_length/2 - leg_width/2, table_width/2 - leg_depth/2, -table_height/2)
-   Dimensions: leg_width × leg_depth × table_height
-   Shape: Box
-
-5. Leg 4 (Back Left)
-   Position: (-table_length/2 + leg_width/2, table_width/2 - leg_depth/2, -table_height/2)
-   Dimensions: leg_width × leg_depth × table_height
-   Shape: Box
-"""
-        elif object_type == "chair":
-            template = """
-# CHAIR COMPONENT PLAN
-## Parameters
-seat_length = ? mm
-seat_width = ? mm
-seat_height = ? mm
-seat_thickness = ? mm
-backrest_height = ? mm
-backrest_thickness = ? mm
-leg_width = ? mm
-
-## Coordinate System
-Origin: Center of bottom face of seat
-X-axis: Length direction (front to back)
-Y-axis: Width direction (side to side)
-Z-axis: Height (upward)
-
-## Components
-1. Seat
-   Position: (0, 0, seat_thickness/2)
-   Dimensions: seat_length × seat_width × seat_thickness
-   Shape: Box
-
-2. Backrest
-   Position: (-seat_length/2 + backrest_thickness/2, 0, (backrest_height/2) + seat_thickness)
-   Dimensions: backrest_thickness × seat_width × backrest_height
-   Shape: Box
-
-3. Leg 1 (Front Left)
-   Position: (seat_length/2 - leg_width/2, -seat_width/2 + leg_width/2, -seat_height/2)
-   Dimensions: leg_width × leg_width × seat_height
-   Shape: Box
-
-4. Leg 2 (Front Right)
-   Position: (seat_length/2 - leg_width/2, seat_width/2 - leg_width/2, -seat_height/2)
-   Dimensions: leg_width × leg_width × seat_height
-   Shape: Box
-   
-5. Leg 3 (Back Right)
-   Position: (-seat_length/2 + leg_width/2, seat_width/2 - leg_width/2, -seat_height/2)
-   Dimensions: leg_width × leg_width × seat_height
-   Shape: Box
-   
-6. Leg 4 (Back Left)
-   Position: (-seat_length/2 + leg_width/2, -seat_width/2 + leg_width/2, -seat_height/2)
-   Dimensions: leg_width × leg_width × seat_height
-   Shape: Box
-"""
-        
-        user_prompt = f"""Create a detailed component plan for this object:
-
-DESCRIPTION:
-{description}
-
-OBJECT TYPE: {object_type}
-
-{user_params_text}
-
-SPATIAL REASONING:
-{spatial_reasoning}
-
-Instructions:
-1. Use the spatial reasoning provided to create a precise component-by-component plan
-2. Ensure each component has:
-   - EXACT position using (x, y, z) coordinates in millimeters
-   - EXACT dimensions in millimeters
-   - Precise geometric shape to use (Box, Cylinder, etc.)
-3. Define all parameters with specific numerical values
-4. Use ABSOLUTE coordinates matching the coordinate system in the spatial reasoning
-5. Position components logically to maintain functional relationships
-6. Include comments explaining positioning logic where helpful
-
-Format your response as a structured plan that can be directly translated to FreeCAD code."""
-
-        if template:
-            user_prompt += f"\n\nUse this template as a guide, but fill in the exact values:\n{template}"
-        
-        model = self.model_selector.currentText()
-        
-        data = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.1,
-            "max_tokens": 3000
-        }
-        
-        try:
-            # Setting verify=False to bypass SSL verification - use with caution
-            response = requests.post(
-                API_ENDPOINT,
-                headers=headers,
-                json=data,
-                verify=False,
-                timeout=40
-            )
-            
-            if response.status_code != 200:
-                self.output_log.append(f"API Response Status: {response.status_code}")
-                self.output_log.append(f"API Response Content: {response.text}")
-                return None
-            
-            result = response.json()
-            plan = result["choices"][0]["message"]["content"]
-            
-            return plan.strip()
-            
-        except Exception as e:
-            self.output_log.append(f"Component plan error: {str(e)}")
-            return None
-    
-    def get_code_from_groq(self, api_key: str, description: str, object_type: str, user_params: dict = None, spatial_reasoning: str = None, component_plan: str = None) -> str:
+    def get_code_from_groq(self, api_key: str, description: str, user_params: dict = None, spatial_reasoning: str = None) -> str:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
@@ -635,244 +336,9 @@ The code should create the specified 3D model in FreeCAD with precise spatial po
         spatial_reasoning_text = ""
         if spatial_reasoning:
             spatial_reasoning_text = f"""Spatial Reasoning Analysis:
-{spatial_reasoning}"""
-        
-        # Include component plan if available
-        component_plan_text = ""
-        if component_plan:
-            component_plan_text = f"""Component Plan:
-{component_plan}"""
-        
-        # Add object-specific instructions
-        object_specific_instructions = ""
-        if object_type == "table":
-            object_specific_instructions = """
-For tables, your code MUST:
-1. Set the origin (0,0,0) at the CENTER of the BOTTOM FACE of the table top
-2. Position the table top centered at (0, 0, table_top_thickness/2)
-3. Position legs at the corners, extending from z=0 downward to the floor
-4. Define all positions using ABSOLUTE coordinates (not relative/incremental)
-5. Set standard dimensions if not specified:
-   - Standard table height: 750mm
-   - Standard top thickness: 30mm
-   - Standard leg width: 50mm"""
-        elif object_type == "chair":
-            object_specific_instructions = """
-For chairs, your code MUST:
-1. Set the origin (0,0,0) at the CENTER of the BOTTOM FACE of the seat
-2. Position the seat centered at (0, 0, seat_thickness/2)
-3. Position legs at the corners, extending from z=0 downward to the floor
-4. Position backrest at the rear edge of the seat, extending upward
-5. Define all positions using ABSOLUTE coordinates (not relative/incremental)
-6. Set standard dimensions if not specified:
-   - Standard seat height: 450mm
-   - Standard backrest height: 350mm above seat
-   - Standard seat thickness: 30mm"""
-        
-        # Add validation code if requested
-        validation_code = ""
-        if self.add_validation_checkbox.isChecked():
-            if object_type == "table":
-                validation_code = """
-# Add validation code to ensure proper positioning
-def validate_table_positioning():
-    doc = App.ActiveDocument
-    table_top = None
-    legs = []
-    
-    # Identify components
-    for obj in doc.Objects:
-        if hasattr(obj, "Label"):
-            if "top" in obj.Label.lower():
-                table_top = obj
-            elif "leg" in obj.Label.lower():
-                legs.append(obj)
-    
-    # Check table top positioning
-    if table_top:
-        bb = table_top.Shape.BoundBox
-        top_center_z = (bb.ZMin + bb.ZMax) / 2
-        top_thickness = bb.ZMax - bb.ZMin
-        top_center_x = (bb.XMin + bb.XMax) / 2
-        top_center_y = (bb.YMin + bb.YMax) / 2
-        
-        print(f"Validation - Table top:")
-        print(f"  Center: ({top_center_x:.1f}, {top_center_y:.1f}, {top_center_z:.1f}) mm")
-        print(f"  Bottom face z-coordinate: {bb.ZMin:.1f} mm (should be near 0)")
-        
-        # Check if bottom face is at z=0
-        if abs(bb.ZMin) > 1.0:  # 1mm tolerance
-            print(f"  WARNING: Table top bottom face not at z=0")
-    
-    # Check legs positioning
-    if legs and table_top:
-        bb_top = table_top.Shape.BoundBox
-        
-        # Gather leg positions
-        leg_positions = []
-        for i, leg in enumerate(legs):
-            bb = leg.Shape.BoundBox
-            top_z = bb.ZMax
-            bottom_z = bb.ZMin
-            center_x = (bb.XMin + bb.XMax) / 2
-            center_y = (bb.YMin + bb.YMax) / 2
-            
-            leg_positions.append((center_x, center_y))
-            
-            print(f"Validation - Leg {i+1}:")
-            print(f"  Position: ({center_x:.1f}, {center_y:.1f}) mm")
-            print(f"  Top z-coordinate: {top_z:.1f} mm (should be near 0)")
-            print(f"  Bottom z-coordinate: {bottom_z:.1f} mm (should touch floor)")
-            
-            # Check if top of leg connects to bottom of table
-            if abs(top_z) > 1.0:  # 1mm tolerance
-                print(f"  WARNING: Leg {i+1} top not at z=0")
-        
-        # Check if legs are at corners
-        if len(legs) >= 4:
-            # TODO: Add more sophisticated checks to ensure legs are at corners
-            pass
+{spatial_reasoning}
 
-# Run validation
-validate_table_positioning()
-"""
-            elif object_type == "chair":
-                validation_code = """
-# Add validation code to ensure proper positioning
-def validate_chair_positioning():
-    doc = App.ActiveDocument
-    seat = None
-    backrest = None
-    legs = []
-    
-    # Identify components
-    for obj in doc.Objects:
-        if hasattr(obj, "Label"):
-            if "seat" in obj.Label.lower():
-                seat = obj
-            elif "back" in obj.Label.lower():
-                backrest = obj
-            elif "leg" in obj.Label.lower():
-                legs.append(obj)
-    
-    # Check seat positioning
-    if seat:
-        bb = seat.Shape.BoundBox
-        seat_center_z = (bb.ZMin + bb.ZMax) / 2
-        seat_thickness = bb.ZMax - bb.ZMin
-        seat_center_x = (bb.XMin + bb.XMax) / 2
-        seat_center_y = (bb.YMin + bb.YMax) / 2
-        
-        print(f"Validation - Seat:")
-        print(f"  Center: ({seat_center_x:.1f}, {seat_center_y:.1f}, {seat_center_z:.1f}) mm")
-        print(f"  Bottom face z-coordinate: {bb.ZMin:.1f} mm (should be near 0)")
-        
-        # Check if bottom face is at z=0
-        if abs(bb.ZMin) > 1.0:  # 1mm tolerance
-            print(f"  WARNING: Seat bottom face not at z=0")
-    
-    # Check backrest positioning
-    if backrest and seat:
-        bb_back = backrest.Shape.BoundBox
-        bb_seat = seat.Shape.BoundBox
-        
-        back_min_z = bb_back.ZMin
-        
-        print(f"Validation - Backrest:")
-        print(f"  Bottom z-coordinate: {back_min_z:.1f} mm")
-        print(f"  Should connect to seat at approximately {bb_seat.ZMin:.1f} mm")
-        
-        # Check if backrest connects to seat
-        if abs(back_min_z - bb_seat.ZMax) > 1.0 and abs(back_min_z - bb_seat.ZMin) > 1.0:
-            print(f"  WARNING: Backrest does not appear to connect to seat")
-    
-    # Check legs positioning
-    if legs and seat:
-        bb_seat = seat.Shape.BoundBox
-        
-        # Gather leg positions
-        for i, leg in enumerate(legs):
-            bb = leg.Shape.BoundBox
-            top_z = bb.ZMax
-            bottom_z = bb.ZMin
-            
-            print(f"Validation - Leg {i+1}:")
-            print(f"  Top z-coordinate: {top_z:.1f} mm (should be near 0)")
-            print(f"  Bottom z-coordinate: {bottom_z:.1f} mm (should touch floor)")
-            
-            # Check if top of leg connects to bottom of seat
-            if abs(top_z) > 1.0:  # 1mm tolerance
-                print(f"  WARNING: Leg {i+1} top not at z=0")
-
-# Run validation
-validate_chair_positioning()
-"""
-            else:
-                validation_code = """
-# Add generic validation code to check component positioning
-def validate_model_positioning():
-    doc = App.ActiveDocument
-    
-    # Report position of all shapes
-    for obj in doc.Objects:
-        if hasattr(obj, "Shape"):
-            bb = obj.Shape.BoundBox
-            center_x = (bb.XMin + bb.XMax) / 2
-            center_y = (bb.YMin + bb.YMax) / 2
-            center_z = (bb.ZMin + bb.ZMax) / 2
-            
-            print(f"Validation - {obj.Label}:")
-            print(f"  Center: ({center_x:.1f}, {center_y:.1f}, {center_z:.1f}) mm")
-            print(f"  Z range: {bb.ZMin:.1f} to {bb.ZMax:.1f} mm")
-
-# Run validation
-validate_model_positioning()
-"""
-        
-        # Include visual debug code if requested
-        visual_debug_code = ""
-        if self.visual_debug_checkbox.isChecked():
-            visual_debug_code = """
-# Add visual debugging indicators
-def add_coordinate_system():
-    # Create origin indicator
-    origin = App.ActiveDocument.addObject("Part::Sphere", "Origin")
-    origin.Radius = 5.0
-    origin.ViewObject.ShapeColor = (1.0, 0.0, 0.0)  # Red
-    
-    # Create X axis indicator
-    x_axis = App.ActiveDocument.addObject("Part::Cylinder", "X_Axis")
-    x_axis.Radius = 2.0
-    x_axis.Height = 100.0
-    x_axis.Placement = App.Placement(App.Vector(50, 0, 0), App.Rotation(App.Vector(0, 1, 0), 90))
-    x_axis.ViewObject.ShapeColor = (1.0, 0.0, 0.0)  # Red
-    
-    # Create Y axis indicator
-    y_axis = App.ActiveDocument.addObject("Part::Cylinder", "Y_Axis")
-    y_axis.Radius = 2.0
-    y_axis.Height = 100.0
-    y_axis.Placement = App.Placement(App.Vector(0, 50, 0), App.Rotation(App.Vector(1, 0, 0), -90))
-    y_axis.ViewObject.ShapeColor = (0.0, 1.0, 0.0)  # Green
-    
-    # Create Z axis indicator
-    z_axis = App.ActiveDocument.addObject("Part::Cylinder", "Z_Axis")
-    z_axis.Radius = 2.0
-    z_axis.Height = 100.0
-    z_axis.Placement = App.Placement(App.Vector(0, 0, 50), App.Rotation())
-    z_axis.ViewObject.ShapeColor = (0.0, 0.0, 1.0)  # Blue
-    
-    # Create a ground plane indicator at z=-750 (typical table height)
-    ground = App.ActiveDocument.addObject("Part::Box", "GroundPlane")
-    ground.Length = 1000.0
-    ground.Width = 1000.0
-    ground.Height = 1.0
-    ground.Placement = App.Placement(App.Vector(-500, -500, -750), App.Rotation())
-    ground.ViewObject.ShapeColor = (0.8, 0.8, 0.8)  # Light gray
-    ground.ViewObject.Transparency = 80
-
-# Add coordinate system indicators
-add_coordinate_system()
-"""
+Follow ALL the spatial relationships and component positioning guidelines above when creating the CAD model."""
         
         user_prompt = f"""Create FreeCAD Python code for: {description}
         
@@ -880,31 +346,20 @@ add_coordinate_system()
 
 {spatial_reasoning_text}
 
-{component_plan_text}
-
 The code must:
 1. Import necessary FreeCAD modules
 2. Create a new document if needed
 3. Create the 3D geometry described
-4. Position all components correctly according to the spatial reasoning and component plan
+4. Position all components correctly according to the spatial reasoning guidelines
 5. Use parametric modeling when appropriate
 6. Set dimensions according to provided parameters
 7. Use reasonable dimensions for parameters not explicitly provided
 8. Add proper colors and appearance
-9. Ensure all components have logical real-world positioning
-10. Define ALL positions using ABSOLUTE coordinates
-11. Be complete and ready to execute
+9. Ensure all components have logical real-world positioning (e.g., table legs must be positioned at corners and support the table top)
+10. Be complete and ready to execute
 
-{object_specific_instructions}
-
+Ensure correct, logical spatial positioning of all components.
 Return only the Python code with no explanations or markdown."""
-
-        # Add validation and visual debug code to prompt if needed
-        if validation_code:
-            user_prompt += "\n\nAdd this validation code at the end of your implementation:\n" + validation_code
-            
-        if visual_debug_code:
-            user_prompt += "\n\nAlso add this visual debug code at the end of your implementation:\n" + visual_debug_code
         
         model = self.model_selector.currentText()
         
@@ -965,8 +420,7 @@ Return only the Python code with no explanations or markdown."""
         except Exception as e:
             return False, f"Failed to execute code: {str(e)}"
 
-    def execute_code_with_debug(self, code: str, object_type: str, user_params: dict = None, 
-                               spatial_reasoning: str = None, component_plan: str = None) -> tuple[bool, str]:
+    def execute_code_with_debug(self, code: str, user_params: dict = None, spatial_reasoning: str = None) -> tuple[bool, str]:
         """Execute code with debugging and error feedback"""
         # Store original code for reference
         original_code = code
@@ -1058,10 +512,7 @@ Return only the Python code with no explanations or markdown."""
                 # If we had errors, try to fix them
                 if attempt < max_attempts - 1:  # Don't try to fix on the last attempt
                     # Send debug info to Groq for correction
-                    code = self.get_fixed_code_from_groq(
-                        original_code, debug_info, object_type, 
-                        user_params, spatial_reasoning, component_plan
-                    )
+                    code = self.get_fixed_code_from_groq(original_code, debug_info, user_params, spatial_reasoning)
                     
                     # Clear errors for next attempt
                     debug_info["errors"] = []
@@ -1109,15 +560,6 @@ Return only the Python code with no explanations or markdown."""
                     if obj.Shape:
                         obj_info["shape_valid"] = obj.Shape.isValid()
                         obj_info["shape_type"] = obj.Shape.ShapeType
-                        
-                        # Capture bounding box for position analysis
-                        bb = obj.Shape.BoundBox
-                        obj_info["bbox"] = {
-                            "XMin": bb.XMin, "XMax": bb.XMax,
-                            "YMin": bb.YMin, "YMax": bb.YMax,
-                            "ZMin": bb.ZMin, "ZMax": bb.ZMax,
-                            "Center": [(bb.XMin + bb.XMax)/2, (bb.YMin + bb.YMax)/2, (bb.ZMin + bb.ZMax)/2]
-                        }
                     else:
                         obj_info["has_shape"] = False
                 
@@ -1131,8 +573,7 @@ Return only the Python code with no explanations or markdown."""
             "objects": objects_info
         })
 
-    def get_fixed_code_from_groq(self, original_code: str, debug_info: dict, object_type: str,
-                                user_params: dict = None, spatial_reasoning: str = None, component_plan: str = None) -> str:
+    def get_fixed_code_from_groq(self, original_code: str, debug_info: dict, user_params: dict = None, spatial_reasoning: str = None) -> str:
         """Send debug info to Groq and get fixed code"""
         # Format debug info for Groq
         error_context = self.format_debug_info(debug_info)
@@ -1148,32 +589,9 @@ Return only the Python code with no explanations or markdown."""
         spatial_reasoning_text = ""
         if spatial_reasoning:
             spatial_reasoning_text = f"""SPATIAL REASONING:
-{spatial_reasoning}"""
-        
-        # Include component plan if available
-        component_plan_text = ""
-        if component_plan:
-            component_plan_text = f"""COMPONENT PLAN:
-{component_plan}"""
-        
-        # Object-specific positioning instructions
-        object_specific = ""
-        if object_type == "table":
-            object_specific = """
-VERY IMPORTANT POSITIONING REQUIREMENTS:
-1. Table top must be positioned with its bottom face at z=0
-2. Table top must be centered at (0, 0, table_top_thickness/2)
-3. Legs must extend downward from z=0 (they must connect to the bottom of the table top)
-4. Legs must be positioned at the corners of the table
-5. All positions must use ABSOLUTE coordinates (not relative/incremental)"""
-        elif object_type == "chair":
-            object_specific = """
-VERY IMPORTANT POSITIONING REQUIREMENTS:
-1. Seat must be positioned with its bottom face at z=0
-2. Seat must be centered at (0, 0, seat_thickness/2)
-3. Legs must extend downward from z=0 (they must connect to the bottom of the seat)
-4. Backrest must connect to the back edge of the seat and extend upward
-5. All positions must use ABSOLUTE coordinates (not relative/incremental)"""
+{spatial_reasoning}
+
+Follow ALL the spatial relationships and component positioning guidelines above when fixing the CAD model."""
         
         # Create prompt for Groq
         prompt = f"""I tried to create a FreeCAD model with the following Python code, but encountered errors:
@@ -1185,23 +603,17 @@ ORIGINAL CODE:
 
 {user_params_text}
 {spatial_reasoning_text}
-{component_plan_text}
-{object_specific}
 
 EXECUTION DETAILS:
 {error_context}
 
 Please fix the code to resolve these errors. Return only the complete corrected code with no explanations or markdown formatting.
 The code must:
-1. Fix ALL execution errors shown above
-2. Ensure components have proper ABSOLUTE positioning
-3. Ensure components maintain logical real-world relationships
-4. For furniture, ensure supporting elements (legs) properly connect to main elements
-5. Maintain the coordinate system where origin (0,0,0) is at the center of the bottom face of the main component
-6. Use clear variable names and well-structured code
-7. Include the validation and visual debug code if it was in the original
-
-Pay special attention to component positioning and ensure all parts are logically placed."""
+1. Be valid Python code that works with FreeCAD's API
+2. Fix all the execution errors shown above
+3. Follow the spatial reasoning guidelines to ensure components have logical placement
+4. Respect the user parameters specified above
+5. Ensure all parts of the model are positioned in realistic, functional arrangements"""
 
         # Send to Groq
         fixed_code = self.send_to_groq(prompt)
@@ -1249,17 +661,10 @@ Pay special attention to component positioning and ensure all parts are logicall
             for obj in last_state["objects"]:
                 obj_status = "Valid" if obj.get("valid", False) else "Invalid"
                 result.append(f"- {obj['name']} ({obj['type']}): {obj_status}")
-                
                 if "has_shape" in obj:
                     if obj["has_shape"]:
                         shape_status = "Valid" if obj.get("shape_valid", False) else "Invalid"
                         result.append(f"  Shape: {obj.get('shape_type', 'Unknown')} ({shape_status})")
-                        
-                        # Include bounding box info if available
-                        if "bbox" in obj:
-                            bb = obj["bbox"]
-                            result.append(f"  Position: Center at ({bb['Center'][0]:.1f}, {bb['Center'][1]:.1f}, {bb['Center'][2]:.1f})")
-                            result.append(f"  Z Range: {bb['ZMin']:.1f} to {bb['ZMax']:.1f}")
                     else:
                         result.append(f"  Shape: None")
         
