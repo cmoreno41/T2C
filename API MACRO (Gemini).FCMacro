@@ -1,0 +1,111 @@
+import FreeCAD
+import FreeCADGui
+import urllib.request
+import urllib.parse
+import json
+import os
+import traceback
+
+def prompt_gemini(prompt_text, api_key, model_name="gemini-1.5-pro-002"):
+    """
+    Prompts the Gemini API using urllib and returns the response text.
+
+    Args:
+        prompt_text: The text prompt to send to the Gemini API.
+        api_key: Your Google Cloud API key.
+        model_name: The name of the Gemini model to use.
+
+    Returns:
+        The generated text from the Gemini API, or None if an error occurred.
+    """
+
+    api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+    request_data = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt_text}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.7,  # Adjust as needed
+            "maxOutputTokens": 200, # and these
+        }
+    }
+
+    request_body = json.dumps(request_data).encode("utf-8")
+
+    req = urllib.request.Request(
+        api_endpoint,
+        data=request_body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            response_body = response.read().decode("utf-8")
+            response_data = json.loads(response_body)
+
+            if "candidates" in response_data and response_data["candidates"]:
+                return response_data["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                FreeCAD.Console.PrintError("No text generated in response.\n")
+                FreeCAD.Console.PrintError(json.dumps(response_data, indent=2)+"\n") # Dump full response for debugging
+                return None
+
+    except urllib.error.HTTPError as e:
+        FreeCAD.Console.PrintError(f"HTTP Error: {e.code} {e.reason}\n")
+        try:  # Attempt to read the error response body
+            error_body = e.read().decode("utf-8")
+            error_data = json.loads(error_body)
+            FreeCAD.Console.PrintError(json.dumps(error_data, indent=2) + "\n")
+        except Exception:
+            FreeCAD.Console.PrintError("Could not read error response body.\n")
+        traceback.print_exc() # Always print the full traceback!
+        return None
+    except urllib.error.URLError as e:
+        FreeCAD.Console.PrintError(f"URL Error: {e.reason}\n")
+        traceback.print_exc()
+        return None
+    except Exception as e:
+        FreeCAD.Console.PrintError(f"An unexpected error occurred: {e}\n")
+        traceback.print_exc()
+        return None
+
+
+
+def run_gemini_test():
+    """
+    Tests the Gemini API interaction by sending a simple prompt
+    and printing the response to the FreeCAD console.
+    """
+
+    # --- 1. Get the API Key (from environment variable) ---
+    api_key = 'AIzaSyB24UU8Ut7BdU-Ho0DVXfnZfw8diwk8v-c'
+    if not api_key:
+        FreeCAD.Console.PrintError("Error: GOOGLE_API_KEY environment variable not set.\n")
+        return
+
+    # --- 2. Define a Test Prompt ---
+    test_prompt = "What is the capital of France?"
+
+    # --- 3. Call the prompt_gemini function ---
+    response_text = prompt_gemini(test_prompt, api_key)
+
+    # --- 4. Print the Response ---
+    if response_text:
+        FreeCAD.Console.PrintMessage("Gemini API Response:\n")
+        FreeCAD.Console.PrintMessage(response_text + "\n")
+    else:
+        FreeCAD.Console.PrintError("Gemini API call failed.\n")
+
+# --- How to Run in FreeCAD ---
+# 1. Open FreeCAD.
+# 2. View -> Panels -> Python console.
+# 3. Copy and paste this ENTIRE script.
+# 4. Ensure the GOOGLE_API_KEY environment variable is set *before* running FreeCAD.
+# 5. Press Enter.
+
+# Run the test function:
+run_gemini_test()
