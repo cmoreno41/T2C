@@ -1,0 +1,1788 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtGui, QtCore
+import requests
+import json
+import traceback
+import ssl
+import urllib3
+import sys
+import re
+
+# Disable SSL warnings - use with caution
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Constants
+DEFAULT_MODEL = "llama3-70b-8192"
+API_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+
+# Global variable to store dialog reference
+_cad_dialog_instance = None
+
+class LLMToCADDialog(QtGui.QDialog):
+    def __init__(self):
+        super(LLMToCADDialog, self).__init__()
+        self.setWindowTitle("Groq CAD Generator")
+        self.resize(700, 750)  # Increased height for feedback section
+        
+        # Make the dialog non-modal to allow interaction with the model
+        self.setModal(False)
+        
+        # Set window flags to keep it on top but allow interaction with FreeCAD
+        self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint)
+        
+        self.setup_ui()
+        
+        # Store the last generated code and model state
+        self.last_generated_code = None
+        self.current_description = None
+        self.current_object_type = None
+        self.current_user_params = None
+        self.current_spatial_reasoning = None
+        self.current_component_plan = None
+        
+    def setup_ui(self):
+        # Main layout
+        layout = QtGui.QVBoxLayout(self)
+        
+        # API Key section
+        api_layout = QtGui.QHBoxLayout()
+        api_layout.addWidget(QtGui.QLabel("Groq API Key:"))
+        self.api_key_input = QtGui.QLineEdit()
+        self.api_key_input.setEchoMode(QtGui.QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("Enter your Groq API key")
+        api_layout.addWidget(self.api_key_input)
+        layout.addLayout(api_layout)
+        
+        # Model selection
+        model_layout = QtGui.QHBoxLayout()
+        model_layout.addWidget(QtGui.QLabel("Groq Model:"))
+        self.model_selector = QtGui.QComboBox()
+        self.model_selector.addItems([
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+            "gemma-7b-it"
+        ])
+        self.model_selector.setCurrentIndex(0)  # Default to llama3-70b
+        model_layout.addWidget(self.model_selector)
+        layout.addLayout(model_layout)
+        
+        # Description section
+        layout.addWidget(QtGui.QLabel("CAD Description:"))
+        self.description_input = QtGui.QTextEdit()
+        self.description_input.setPlaceholderText("Describe what you want to create in detail...")
+        layout.addWidget(self.description_input)
+        
+        # User-defined spatial parameters section
+        param_group = QtGui.QGroupBox("Custom Spatial Parameters (Optional)")
+        param_group_layout = QtGui.QVBoxLayout(param_group)
+        
+        # Container for parameters
+        self.param_container = QtGui.QWidget()
+        self.param_layout = QtGui.QVBoxLayout(self.param_container)
+        self.param_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Initial parameter rows
+        self.param_rows = []
+        self.add_param_row()
+        
+        # Add parameter button
+        param_btn_layout = QtGui.QHBoxLayout()
+        add_param_btn = QtGui.QPushButton("Add Parameter")
+        add_param_btn.clicked.connect(self.add_param_row)
+        param_btn_layout.addWidget(add_param_btn)
+        param_btn_layout.addStretch()
+        self.param_layout.addLayout(param_btn_layout)
+        
+        # Add scrollable area for parameters
+        scroll_area = QtGui.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.param_container)
+        scroll_area.setMaximumHeight(120)
+        param_group_layout.addWidget(scroll_area)
+        layout.addWidget(param_group)
+        
+        # Advanced options section
+        advanced_group = QtGui.QGroupBox("Advanced Options")
+        advanced_layout = QtGui.QVBoxLayout(advanced_group)
+        
+        # LLM Spatial Reasoning
+        reasoning_options = QtGui.QHBoxLayout()
+        self.spatial_reasoning_checkbox = QtGui.QCheckBox("Enable AI Spatial Reasoning")
+        self.spatial_reasoning_checkbox.setChecked(True)
+        reasoning_options.addWidget(self.spatial_reasoning_checkbox)
+        
+        self.show_reasoning_checkbox = QtGui.QCheckBox("Show Reasoning")
+        self.show_reasoning_checkbox.setChecked(False)
+        reasoning_options.addWidget(self.show_reasoning_checkbox)
+        
+        self.component_plan_checkbox = QtGui.QCheckBox("Generate Component Plan")
+        self.component_plan_checkbox.setChecked(True)
+        reasoning_options.addWidget(self.component_plan_checkbox)
+        
+        reasoning_options.addStretch()
+        advanced_layout.addLayout(reasoning_options)
+        
+        # Debug options
+        debug_options = QtGui.QHBoxLayout()
+        self.debug_checkbox = QtGui.QCheckBox("Debug Mode")
+        debug_options.addWidget(self.debug_checkbox)
+        
+        self.visual_debug_checkbox = QtGui.QCheckBox("Visual Debug")
+        self.visual_debug_checkbox.setChecked(True)
+        debug_options.addWidget(self.visual_debug_checkbox)
+        
+        self.add_validation_checkbox = QtGui.QCheckBox("Add Validation Code")
+        self.add_validation_checkbox.setChecked(True)
+        debug_options.addWidget(self.add_validation_checkbox)
+        
+        debug_options.addStretch()
+        advanced_layout.addLayout(debug_options)
+        
+        # Object type selection
+        object_type_layout = QtGui.QHBoxLayout()
+        object_type_layout.addWidget(QtGui.QLabel("Object Type:"))
+        self.object_type_selector = QtGui.QComboBox()
+        self.object_type_selector.addItems([
+            "Auto-detect",
+            "Table",
+            "Chair",
+            "Shelf",
+            "Cabinet",
+            "Desk",
+            "Bed",
+            "Other"
+        ])
+        self.object_type_selector.setCurrentIndex(0)  # Default to auto-detect
+        object_type_layout.addWidget(self.object_type_selector)
+        object_type_layout.addStretch()
+        advanced_layout.addLayout(object_type_layout)
+        
+        layout.addWidget(advanced_group)
+        
+        # Spatial reasoning output
+        self.spatial_reasoning_output = QtGui.QTextEdit()
+        self.spatial_reasoning_output.setReadOnly(True)
+        self.spatial_reasoning_output.setPlaceholderText("AI spatial reasoning will appear here when generation starts...")
+        self.spatial_reasoning_output.setMaximumHeight(100)
+        self.spatial_reasoning_output.setVisible(False)
+        layout.addWidget(self.spatial_reasoning_output)
+        
+        # Connect show reasoning checkbox to visibility
+        self.show_reasoning_checkbox.stateChanged.connect(
+            lambda: self.spatial_reasoning_output.setVisible(self.show_reasoning_checkbox.isChecked())
+        )
+        
+        # Model Feedback Section
+        feedback_group = QtGui.QGroupBox("Model Feedback")
+        feedback_layout = QtGui.QVBoxLayout(feedback_group)
+        
+        feedback_layout.addWidget(QtGui.QLabel("Describe what's wrong with the model:"))
+        self.feedback_input = QtGui.QTextEdit()
+        self.feedback_input.setPlaceholderText("After generating the model, describe any issues or corrections needed...")
+        self.feedback_input.setMaximumHeight(100)
+        feedback_layout.addWidget(self.feedback_input)
+        
+        # Feedback button
+        feedback_btn_layout = QtGui.QHBoxLayout()
+        self.fix_model_button = QtGui.QPushButton("Fix Model Based on Feedback")
+        self.fix_model_button.clicked.connect(self.fix_model)
+        self.fix_model_button.setEnabled(False)  # Initially disabled until a model is generated
+        feedback_btn_layout.addWidget(self.fix_model_button)
+        feedback_btn_layout.addStretch()
+        feedback_layout.addLayout(feedback_btn_layout)
+        
+        layout.addWidget(feedback_group)
+        
+        # Generate and Close buttons
+        button_layout = QtGui.QHBoxLayout()
+        self.generate_button = QtGui.QPushButton("Generate CAD Model")
+        self.generate_button.clicked.connect(self.generate_model)
+        button_layout.addWidget(self.generate_button)
+        
+        self.close_button = QtGui.QPushButton("Close")
+        self.close_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
+        
+        # Output log
+        layout.addWidget(QtGui.QLabel("Output:"))
+        self.output_log = QtGui.QTextEdit()
+        self.output_log.setReadOnly(True)
+        layout.addWidget(self.output_log)
+    
+    def add_param_row(self):
+        row_layout = QtGui.QHBoxLayout()
+        
+        # Parameter name
+        param_name = QtGui.QLineEdit()
+        param_name.setPlaceholderText("Parameter name (e.g., width)")
+        row_layout.addWidget(param_name)
+        
+        # Parameter value
+        param_value = QtGui.QLineEdit()
+        param_value.setPlaceholderText("Value (e.g., 100mm)")
+        row_layout.addWidget(param_value)
+        
+        # Remove button
+        remove_btn = QtGui.QPushButton("X")
+        remove_btn.setMaximumWidth(30)
+        remove_btn.clicked.connect(lambda: self.remove_param_row(row_widget))
+        row_layout.addWidget(remove_btn)
+        
+        # Create a container widget for this row
+        row_widget = QtGui.QWidget()
+        row_widget.setLayout(row_layout)
+        
+        # Insert the new row before the "Add Parameter" button
+        self.param_layout.insertWidget(len(self.param_rows), row_widget)
+        
+        # Store references to widgets for later retrieval
+        self.param_rows.append({
+            "widget": row_widget,
+            "name": param_name,
+            "value": param_value
+        })
+    
+    def remove_param_row(self, row_widget):
+        # Find the row in our list
+        for i, row in enumerate(self.param_rows):
+            if row["widget"] == row_widget:
+                # Remove from layout and delete
+                self.param_layout.removeWidget(row_widget)
+                row_widget.deleteLater()
+                # Remove from our list
+                self.param_rows.pop(i)
+                break
+    
+    def get_spatial_parameters(self) -> dict:
+        parameters = {}
+        for row in self.param_rows:
+            name = row["name"].text().strip()
+            value = row["value"].text().strip()
+            if name and value:
+                parameters[name] = value
+        return parameters
+    
+    def get_object_type(self, description: str) -> str:
+        """Determine the object type either from selector or by analyzing description"""
+        selected_type = self.object_type_selector.currentText()
+        
+        if selected_type != "Auto-detect":
+            return selected_type.lower()
+        
+        # Simple keyword detection for auto-detection
+        description_lower = description.lower()
+        
+        if any(word in description_lower for word in ["table", "dining", "coffee table"]):
+            return "table"
+        elif any(word in description_lower for word in ["chair", "stool"]):
+            return "chair"
+        elif any(word in description_lower for word in ["shelf", "bookshelf", "shelving"]):
+            return "shelf"
+        elif any(word in description_lower for word in ["cabinet", "dresser", "wardrobe"]):
+            return "cabinet"
+        elif any(word in description_lower for word in ["desk", "workstation"]):
+            return "desk"
+        elif any(word in description_lower for word in ["bed", "bedframe"]):
+            return "bed"
+        
+        return "other"
+    
+    def generate_model(self):
+        api_key = self.api_key_input.text().strip()
+        description = self.description_input.toPlainText().strip()
+        
+        if not api_key:
+            self.output_log.append("Error: API key is required")
+            return
+            
+        if not description:
+            self.output_log.append("Error: Please provide a description")
+            return
+        
+        try:
+            # Store current description for potential fixes later
+            self.current_description = description
+            
+            # Get user-defined spatial parameters
+            user_params = self.get_spatial_parameters()
+            self.current_user_params = user_params
+            
+            # Determine object type
+            object_type = self.get_object_type(description)
+            self.current_object_type = object_type
+            self.output_log.append(f"Detected object type: {object_type}")
+            
+            spatial_reasoning = None
+            component_plan = None
+            
+            # Generate spatial reasoning if enabled
+            if self.spatial_reasoning_checkbox.isChecked():
+                self.output_log.append("Generating spatial reasoning...")
+                spatial_reasoning = self.generate_spatial_reasoning(api_key, description, object_type, user_params)
+                self.current_spatial_reasoning = spatial_reasoning
+                
+                if not spatial_reasoning:
+                    self.output_log.append("Warning: Failed to generate spatial reasoning. Continuing without it.")
+                else:
+                    # Display reasoning if requested
+                    if self.show_reasoning_checkbox.isChecked():
+                        self.spatial_reasoning_output.setVisible(True)
+                        self.spatial_reasoning_output.setText(spatial_reasoning)
+                    self.output_log.append("Spatial reasoning completed.")
+            
+            # Generate component plan if enabled
+            if self.component_plan_checkbox.isChecked() and spatial_reasoning:
+                self.output_log.append("Generating component plan...")
+                component_plan = self.generate_component_plan(api_key, description, object_type, spatial_reasoning, user_params)
+                self.current_component_plan = component_plan
+                
+                if not component_plan:
+                    self.output_log.append("Warning: Failed to generate component plan. Continuing without it.")
+                else:
+                    self.output_log.append("Component plan completed.")
+            
+            # Generate CAD code
+            self.output_log.append("Sending request to Groq for CAD code generation...")
+            code = self.get_code_from_groq(api_key, description, object_type, user_params, spatial_reasoning, component_plan)
+            
+            if code:
+                # Store the code for potential fixes later
+                self.last_generated_code = code
+                
+                self.output_log.append("Code generated. Executing in FreeCAD...")
+                
+                if self.debug_checkbox.isChecked():
+                    success, message = self.execute_code_with_debug(code, object_type, user_params, spatial_reasoning, component_plan)
+                else:
+                    success, message = self.execute_code(code)
+                    
+                if success:
+                    self.output_log.append("Success: " + message)
+                    # Enable the fix model button now that we have a model
+                    self.fix_model_button.setEnabled(True)
+                else:
+                    self.output_log.append("Error: " + message)
+                    self.output_log.append("Generated code:")
+                    self.output_log.append(code)
+            else:
+                self.output_log.append("Failed to generate code from Groq")
+        except Exception as e:
+            self.output_log.append(f"Error: {str(e)}")
+            self.output_log.append(traceback.format_exc())
+    
+    def fix_model(self):
+        """Fix the model based on user feedback"""
+        api_key = self.api_key_input.text().strip()
+        feedback = self.feedback_input.toPlainText().strip()
+        
+        if not api_key:
+            self.output_log.append("Error: API key is required")
+            return
+            
+        if not feedback:
+            self.output_log.append("Error: Please provide feedback on what needs to be fixed")
+            return
+            
+        if not self.last_generated_code:
+            self.output_log.append("Error: No model has been generated yet")
+            return
+        
+        try:
+            self.output_log.append("Processing feedback and generating fixed model...")
+            
+            # Get corrected code based on feedback
+            corrected_code = self.get_corrected_code(
+                api_key, 
+                self.current_description, 
+                self.current_object_type, 
+                self.current_user_params, 
+                self.current_spatial_reasoning, 
+                self.current_component_plan, 
+                self.last_generated_code, 
+                feedback
+            )
+            
+            if corrected_code:
+                # Update the stored code
+                self.last_generated_code = corrected_code
+                
+                # Close the current document to start fresh
+                if App.ActiveDocument:
+                    doc_name = App.ActiveDocument.Name
+                    App.closeDocument(doc_name)
+                
+                self.output_log.append("Corrected code generated. Executing in FreeCAD...")
+                
+                if self.debug_checkbox.isChecked():
+                    success, message = self.execute_code_with_debug(
+                        corrected_code, 
+                        self.current_object_type, 
+                        self.current_user_params, 
+                        self.current_spatial_reasoning, 
+                        self.current_component_plan
+                    )
+                else:
+                    success, message = self.execute_code(corrected_code)
+                    
+                if success:
+                    self.output_log.append("Success: Model corrected - " + message)
+                else:
+                    self.output_log.append("Error: " + message)
+                    self.output_log.append("Corrected code:")
+                    self.output_log.append(corrected_code)
+            else:
+                self.output_log.append("Failed to generate corrected code")
+        except Exception as e:
+            self.output_log.append(f"Error during model correction: {str(e)}")
+            self.output_log.append(traceback.format_exc())
+    
+    def get_corrected_code(self, api_key: str, description: str, object_type: str, 
+                          user_params: dict, spatial_reasoning: str, component_plan: str,
+                          original_code: str, feedback: str) -> str:
+        """Generate corrected CAD code based on user feedback"""
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        # Format user parameters text if available
+        user_params_text = ""
+        if user_params and len(user_params) > 0:
+            user_params_text = "User-defined parameters:\n"
+            for name, value in user_params.items():
+                user_params_text += f"- {name}: {value}\n"
+        
+        system_prompt = """You are a CAD engineering assistant specialized in correcting 3D models based on user feedback.
+Your task is to analyze the original code, understand the user's feedback, and generate corrected code that addresses the issues.
+Return ONLY executable Python code with no explanations or markdown formatting.
+The code should create the specified 3D model in FreeCAD with the corrections requested by the user."""
+        
+        user_prompt = f"""I created a FreeCAD model with the code below, but there are issues with it.
+Please correct the code based on my feedback.
+
+ORIGINAL DESCRIPTION:
+{description}
+
+OBJECT TYPE: {object_type}
+
+{user_params_text}
+
+SPATIAL REASONING (if available):
+{spatial_reasoning or "Not provided"}
+
+COMPONENT PLAN (if available):
+{component_plan or "Not provided"}
+
+ORIGINAL CODE:
+```
+{original_code}
+```
+
+USER FEEDBACK ABOUT THE MODEL:
+{feedback}
+
+Please correct the code to address the user's feedback. The corrected code should:
+1. Fix ALL issues mentioned in the feedback
+2. Maintain the original functionality for aspects not mentioned in the feedback
+3. Use the same overall structure and approach as the original code
+4. Be complete and ready to execute in FreeCAD
+5. Follow proper FreeCAD Python API conventions
+6. Use FreeCAD (not App) consistently throughout the code
+7. Handle placements properly with FreeCAD.Placement, FreeCAD.Vector, and FreeCAD.Rotation
+8. Maintain the proper coordinate system (origin at center of bottom face, etc.)
+
+IMPORTANT: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension.
+
+For example, to place a table top (1200mm × 800mm × 30mm) centered at origin:
+- The correct placement is: FreeCAD.Vector(-600, -400, 0)
+- NOT: FreeCAD.Vector(0, 0, 0) which would place the corner at origin
+
+Return ONLY the complete corrected code with no explanations or markdown."""
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=60
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            code = result["choices"][0]["message"]["content"]
+            
+            # Remove markdown code blocks if present
+            if code.startswith("```python"):
+                code = code.replace("```python", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+            elif code.startswith("```"):
+                code = code.replace("```", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+            
+            return code.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Request error details: {str(e)}")
+            raise
+    
+    def generate_spatial_reasoning(self, api_key: str, description: str, object_type: str, user_params: dict = None) -> str:
+        """Generate logical spatial relationships for the described object"""
+        # Sanitize API key - remove any whitespace, newlines or carriage returns
+        api_key = api_key.strip()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        # Construct user parameters text if available
+        user_params_text = ""
+        if user_params and len(user_params) > 0:
+            user_params_text = "User-defined parameters:\n"
+            for name, value in user_params.items():
+                user_params_text += f"- {name}: {value}\n"
+        
+        system_prompt = """You are a CAD engineering assistant with extensive knowledge of 3D modeling and real-world objects.
+Your task is to analyze a description and provide detailed spatial reasoning about how components should be logically arranged.
+Focus on identifying key components and their proper spatial relationships.
+
+VERY IMPORTANT: Define a CLEAR coordinate system where:
+- The origin (0,0,0) is at the CENTER of the BOTTOM FACE of the main component (e.g., table top)
+- Z-axis points upward (height)
+- X-axis defines the length (typically longer dimension) 
+- Y-axis defines the width (typically shorter dimension)
+- All measurements must be explicitly defined in millimeters (mm)
+- Use negative z-values for anything below the main component's bottom face
+- Use absolute coordinates for all component positions
+
+NOTE: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension."""
+        
+        # Add object-specific instructions
+        object_specific = ""
+        if object_type == "table":
+            object_specific = """
+For tables:
+- Table top origin should be at (0,0,0) at the center of its bottom face
+- Table top extends along +Z by its thickness
+- Table legs should extend downward from z=0 to z=-table_height
+- Legs should be positioned at the corners of the table
+- Calculate exact coordinates for all four legs
+- Dimensions should follow furniture standards:
+  - Standard dining table height: 750mm
+  - Standard coffee table height: 450mm
+  - Standard console table height: 750-800mm
+
+REMEMBER: To place the table top with its center at (0,0,0), you must offset its placement
+coordinates by negative half of its dimensions. For a 1200mm × 800mm table top, the placement
+would be (-600, -400, 0) in FreeCAD.
+"""
+        elif object_type == "chair":
+            object_specific = """
+For chairs:
+- Seat origin should be at (0,0,0) at the center of its bottom face
+- Seat extends along +Z by its thickness
+- Legs should extend downward from z=0 to z=-seat_height
+- Backrest should extend upward from the back edge of the seat
+- Calculate exact coordinates for all legs and the backrest
+- Dimensions should follow furniture standards:
+  - Standard seat height: 450mm
+  - Standard backrest height from floor: 800-950mm
+
+REMEMBER: To place the seat with its center at (0,0,0), you must offset its placement
+coordinates by negative half of its dimensions. For a 500mm × 500mm seat, the placement
+would be (-250, -250, 0) in FreeCAD.
+"""
+        
+        user_prompt = f"""Analyze this object description and provide detailed spatial reasoning:
+
+DESCRIPTION:
+{description}
+
+OBJECT TYPE: {object_type}
+
+{user_params_text}
+
+Instructions:
+1. Identify the main object and all its key components
+2. For each component, determine:
+   - Its proper position using EXACT ABSOLUTE COORDINATES with the origin as specified
+   - Its proper orientation (which way is up, front, etc.)
+   - Any logical constraints (e.g., legs must touch the ground)
+   - EXACT dimensions in millimeters (mm)
+3. Provide explicit (x,y,z) coordinates for ALL components
+4. Identify any symmetries that should be maintained
+5. Note any functional requirements that affect positioning
+6. For each component, clearly state its corner placement coordinates (not center placement)
+   Since FreeCAD places objects by their corner, not their center
+
+Provide your analysis as a structured list of spatial guidelines and constraints.
+Focus ONLY on the spatial relationships, positioning, and constraints."""
+
+        if object_specific:
+            user_prompt += f"\n\n{object_specific}"
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 2000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=40
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                return None
+            
+            result = response.json()
+            reasoning = result["choices"][0]["message"]["content"]
+            
+            return reasoning.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Spatial reasoning error: {str(e)}")
+            return None
+    
+    def generate_component_plan(self, api_key: str, description: str, object_type: str, spatial_reasoning: str, user_params: dict = None) -> str:
+        """Generate a specific component plan with exact coordinates and dimensions"""
+        # Sanitize API key - remove any whitespace, newlines or carriage returns
+        api_key = api_key.strip()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        # Construct user parameters text if available
+        user_params_text = ""
+        if user_params and len(user_params) > 0:
+            user_params_text = "User-defined parameters:\n"
+            for name, value in user_params.items():
+                user_params_text += f"- {name}: {value}\n"
+        
+        system_prompt = """You are a CAD engineering assistant that specializes in creating precise component plans with exact measurements and coordinates.
+Your task is to create a structured, detailed plan for implementing a 3D model in FreeCAD, based on spatial reasoning guidelines.
+Focus on translating conceptual guidelines into precise numerical specifications that can be directly implemented in code.
+
+IMPORTANT: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension."""
+        
+        # Add object-specific templates
+        template = ""
+        if object_type == "table":
+            template = """
+# TABLE COMPONENT PLAN
+## Parameters
+table_length = ? mm
+table_width = ? mm
+table_height = ? mm
+table_top_thickness = ? mm
+leg_width = ? mm
+leg_depth = ? mm
+
+## Coordinate System
+Origin: Center of bottom face of table top
+X-axis: Length direction
+Y-axis: Width direction
+Z-axis: Height (upward)
+
+## Components
+1. Table Top
+   Position: (-table_length/2, -table_width/2, 0)
+   Dimensions: table_length × table_width × table_top_thickness
+   Shape: Box
+
+2. Leg 1 (Front Left)
+   Position: (-table_length/2, -table_width/2, -table_height)
+   Dimensions: leg_width × leg_depth × table_height
+   Shape: Box
+
+3. Leg 2 (Front Right)
+   Position: (table_length/2 - leg_width, -table_width/2, -table_height)
+   Dimensions: leg_width × leg_depth × table_height
+   Shape: Box
+
+4. Leg 3 (Back Right)
+   Position: (table_length/2 - leg_width, table_width/2 - leg_depth, -table_height)
+   Dimensions: leg_width × leg_depth × table_height
+   Shape: Box
+
+5. Leg 4 (Back Left)
+   Position: (-table_length/2, table_width/2 - leg_depth, -table_height)
+   Dimensions: leg_width × leg_depth × table_height
+   Shape: Box
+"""
+        elif object_type == "chair":
+            template = """
+# CHAIR COMPONENT PLAN
+## Parameters
+seat_length = ? mm
+seat_width = ? mm
+seat_height = ? mm
+seat_thickness = ? mm
+backrest_height = ? mm
+backrest_thickness = ? mm
+leg_width = ? mm
+
+## Coordinate System
+Origin: Center of bottom face of seat
+X-axis: Length direction (front to back)
+Y-axis: Width direction (side to side)
+Z-axis: Height (upward)
+
+## Components
+1. Seat
+   Position: (-seat_length/2, -seat_width/2, 0)
+   Dimensions: seat_length × seat_width × seat_thickness
+   Shape: Box
+
+2. Backrest
+   Position: (-seat_length/2, -seat_width/2, seat_thickness)
+   Dimensions: backrest_thickness × seat_width × backrest_height
+   Shape: Box
+
+3. Leg 1 (Front Left)
+   Position: (-seat_length/2, -seat_width/2, -seat_height)
+   Dimensions: leg_width × leg_width × seat_height
+   Shape: Box
+
+4. Leg 2 (Front Right)
+   Position: (-seat_length/2, seat_width/2 - leg_width, -seat_height)
+   Dimensions: leg_width × leg_width × seat_height
+   Shape: Box
+   
+5. Leg 3 (Back Right)
+   Position: (seat_length/2 - leg_width, seat_width/2 - leg_width, -seat_height)
+   Dimensions: leg_width × leg_width × seat_height
+   Shape: Box
+   
+6. Leg 4 (Back Left)
+   Position: (seat_length/2 - leg_width, -seat_width/2, -seat_height)
+   Dimensions: leg_width × leg_width × seat_height
+   Shape: Box
+"""
+        
+        user_prompt = f"""Create a detailed component plan for this object:
+
+DESCRIPTION:
+{description}
+
+OBJECT TYPE: {object_type}
+
+{user_params_text}
+
+SPATIAL REASONING:
+{spatial_reasoning}
+
+Instructions:
+1. Use the spatial reasoning provided to create a precise component-by-component plan
+2. Ensure each component has:
+   - EXACT position using (x, y, z) coordinates in millimeters
+   - EXACT dimensions in millimeters
+   - Precise geometric shape to use (Box, Cylinder, etc.)
+3. Define all parameters with specific numerical values
+4. Use ABSOLUTE coordinates matching the coordinate system in the spatial reasoning
+5. Position components logically to maintain functional relationships
+6. Include comments explaining positioning logic where helpful
+
+IMPORTANT: In FreeCAD, when creating objects like a Box, the placement coordinates are for 
+the object's corner, not its center. To place a component with its center at the origin, you 
+must offset the placement by negative half of each dimension.
+
+Format your response as a structured plan that can be directly translated to FreeCAD code."""
+
+        if template:
+            user_prompt += f"\n\nUse this template as a guide, but fill in the exact values:\n{template}"
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.1,
+            "max_tokens": 3000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=40
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                return None
+            
+            result = response.json()
+            plan = result["choices"][0]["message"]["content"]
+            
+            return plan.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Component plan error: {str(e)}")
+            return None
+    
+    def get_code_from_groq(self, api_key: str, description: str, object_type: str, user_params: dict = None, spatial_reasoning: str = None, component_plan: str = None) -> str:
+        # Sanitize API key - remove any whitespace, newlines or carriage returns
+        api_key = api_key.strip()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        system_prompt = """You are a CAD assistant that converts descriptions into FreeCAD Python code. 
+Return ONLY executable Python code with no explanations or markdown formatting. 
+The code should create the specified 3D model in FreeCAD with precise spatial positioning of all components.
+IMPORTANT: Always import both FreeCAD and Part modules. Be consistent with naming - use 'FreeCAD' consistently 
+throughout the code and NOT 'App'."""
+        
+        # Construct user parameters text if available
+        user_params_text = ""
+        if user_params and len(user_params) > 0:
+            user_params_text = "User Parameters:\n"
+            for name, value in user_params.items():
+                user_params_text += f"- {name}: {value}\n"
+        
+        # Include spatial reasoning if available
+        spatial_reasoning_text = ""
+        if spatial_reasoning:
+            spatial_reasoning_text = f"""Spatial Reasoning Analysis:
+{spatial_reasoning}"""
+        
+        # Include component plan if available
+        component_plan_text = ""
+        if component_plan:
+            component_plan_text = f"""Component Plan:
+{component_plan}"""
+        
+        # Add object-specific instructions
+        object_specific_instructions = ""
+        if object_type == "table":
+            object_specific_instructions = """
+For tables, your code MUST:
+1. Set the origin (0,0,0) at the CENTER of the BOTTOM FACE of the table top
+2. Position the table top with its bottom face at z=0 and centered
+3. VERY IMPORTANT: When creating a Box, the placement coordinates are for its corner, NOT its center
+4. For a table top with dimensions Length × Width × Height, use:
+   table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
+5. Position legs at the corners, extending from z=0 downward to the floor
+6. Define all positions using ABSOLUTE coordinates (not relative/incremental)
+7. Set standard dimensions if not specified:
+   - Standard table height: 750mm
+   - Standard top thickness: 30mm
+   - Standard leg width: 50mm"""
+        elif object_type == "chair":
+            object_specific_instructions = """
+For chairs, your code MUST:
+1. Set the origin (0,0,0) at the CENTER of the BOTTOM FACE of the seat
+2. Position the seat with its bottom face at z=0 and centered
+3. VERY IMPORTANT: When creating a Box, the placement coordinates are for its corner, NOT its center
+4. For a seat with dimensions Length × Width × Height, use:
+   seat.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
+5. Position legs at the corners, extending from z=0 downward to the floor
+6. Position backrest at the rear edge of the seat, extending upward
+7. Define all positions using ABSOLUTE coordinates (not relative/incremental)
+8. Set standard dimensions if not specified:
+   - Standard seat height: 450mm
+   - Standard backrest height: 350mm above seat
+   - Standard seat thickness: 30mm"""
+        
+        # Updated positioning example with clear explanation
+        default_table_positioning = """
+# Example for CORRECT table positioning:
+# Create table top centered at origin
+table_top = FreeCAD.ActiveDocument.addObject("Part::Box", "TableTop")
+table_top.Length = 1200  # X direction (mm)
+table_top.Width = 800    # Y direction (mm)
+table_top.Height = 30    # Z direction (mm)
+
+# CORRECT: Position so bottom face is at z=0 and center of bottom face is at origin (0,0,0)
+# Since box placement is by corner, we need to offset by negative half of each dimension
+table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-600, -400, 0), FreeCAD.Rotation())
+
+# INCORRECT - this would place the corner at origin, not the center:
+# table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), FreeCAD.Rotation())
+
+# Create legs at corners, extending down from z=0
+leg1 = FreeCAD.ActiveDocument.addObject("Part::Box", "Leg1")
+leg1.Length = 50  # X direction (mm)
+leg1.Width = 50   # Y direction (mm)
+leg1.Height = 720 # Z direction (mm)
+
+# Position at front-left corner, with top of leg at z=0
+# Again using proper corner placement
+leg1.Placement = FreeCAD.Placement(FreeCAD.Vector(-600, -400, -720), FreeCAD.Rotation())
+"""
+        
+        # Determine what specific positioning example to include
+        positioning_example = ""
+        if object_type == "table":
+            positioning_example = default_table_positioning
+        
+        user_prompt = f"""Create FreeCAD Python code for: {description}
+        
+{user_params_text}
+
+{spatial_reasoning_text}
+
+{component_plan_text}
+
+The code must:
+1. Import necessary FreeCAD modules (always import FreeCAD, FreeCADGui, and Part)
+2. Create a new document if needed
+3. Create the 3D geometry described
+4. Position all components correctly according to the spatial reasoning and component plan
+5. Use parametric modeling when appropriate
+6. Set dimensions according to provided parameters
+7. Use reasonable dimensions for parameters not explicitly provided
+8. Add proper colors and appearance
+9. Ensure all components have logical real-world positioning
+10. Define ALL positions using ABSOLUTE coordinates
+11. Be complete and ready to execute
+
+CRITICAL PLACEMENT INFORMATION - READ CAREFULLY:
+- In FreeCAD, when placing Box objects (and most other objects), the placement coordinates refer to
+  the CORNER of the box, NOT its center
+- To place an object with its center at (0,0,0), its placement must be at (-width/2, -length/2, 0)
+- All components must be positioned using this corner-based placement system
+- NEVER use placement coordinates of (0,0,0) for the main component - this incorrectly places
+  the corner at the origin, not the center
+
+{positioning_example}
+
+{object_specific_instructions}
+
+Return only the Python code with no explanations or markdown."""
+
+        # Add validation and visual debug code to prompt if needed
+        if self.add_validation_checkbox.isChecked():
+            if object_type == "table":
+                validation_code = """
+# Add validation code to ensure proper positioning
+def validate_table_positioning():
+    doc = FreeCAD.ActiveDocument
+    table_top = None
+    legs = []
+    
+    # Identify components
+    for obj in doc.Objects:
+        if hasattr(obj, "Label"):
+            if "top" in obj.Label.lower():
+                table_top = obj
+            elif "leg" in obj.Label.lower():
+                legs.append(obj)
+    
+    # Check table top positioning
+    if table_top:
+        bb = table_top.Shape.BoundBox
+        top_center_z = (bb.ZMin + bb.ZMax) / 2
+        top_thickness = bb.ZMax - bb.ZMin
+        top_center_x = (bb.XMin + bb.XMax) / 2
+        top_center_y = (bb.YMin + bb.YMax) / 2
+        
+        print(f"Validation - Table top:")
+        print(f"  Center: ({top_center_x:.1f}, {top_center_y:.1f}, {top_center_z:.1f}) mm")
+        print(f"  Bottom face z-coordinate: {bb.ZMin:.1f} mm (should be near 0)")
+        
+        # Check if bottom face is at z=0
+        if abs(bb.ZMin) > 1.0:  # 1mm tolerance
+            print(f"  WARNING: Table top bottom face not at z=0")
+    
+    # Check legs positioning
+    if legs and table_top:
+        bb_top = table_top.Shape.BoundBox
+        
+        # Gather leg positions
+        leg_positions = []
+        for i, leg in enumerate(legs):
+            bb = leg.Shape.BoundBox
+            top_z = bb.ZMax
+            bottom_z = bb.ZMin
+            center_x = (bb.XMin + bb.XMax) / 2
+            center_y = (bb.YMin + bb.YMax) / 2
+            
+            leg_positions.append((center_x, center_y))
+            
+            print(f"Validation - Leg {i+1}:")
+            print(f"  Position: ({center_x:.1f}, {center_y:.1f}) mm")
+            print(f"  Top z-coordinate: {top_z:.1f} mm (should be near 0)")
+            print(f"  Bottom z-coordinate: {bottom_z:.1f} mm (should touch floor)")
+            
+            # Check if top of leg connects to bottom of table
+            if abs(top_z) > 1.0:  # 1mm tolerance
+                print(f"  WARNING: Leg {i+1} top not at z=0")
+
+# Run validation
+validate_table_positioning()
+"""
+                user_prompt += "\n\nAdd this validation code at the end of your implementation:\n" + validation_code
+                
+        if self.visual_debug_checkbox.isChecked():
+            visual_debug_code = """
+# Add visual debugging indicators
+def add_coordinate_system():
+    # Create origin indicator
+    origin = FreeCAD.ActiveDocument.addObject("Part::Sphere", "Origin")
+    origin.Radius = 5.0
+    origin.ViewObject.ShapeColor = (1.0, 0.0, 0.0)  # Red
+    
+    # Create X axis indicator
+    x_axis = FreeCAD.ActiveDocument.addObject("Part::Cylinder", "X_Axis")
+    x_axis.Radius = 2.0
+    x_axis.Height = 100.0
+    x_axis.Placement = FreeCAD.Placement(FreeCAD.Vector(50, 0, 0), FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90))
+    x_axis.ViewObject.ShapeColor = (1.0, 0.0, 0.0)  # Red
+    
+    # Create Y axis indicator
+    y_axis = FreeCAD.ActiveDocument.addObject("Part::Cylinder", "Y_Axis")
+    y_axis.Radius = 2.0
+    y_axis.Height = 100.0
+    y_axis.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 50, 0), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90))
+    y_axis.ViewObject.ShapeColor = (0.0, 1.0, 0.0)  # Green
+    
+    # Create Z axis indicator
+    z_axis = FreeCAD.ActiveDocument.addObject("Part::Cylinder", "Z_Axis")
+    z_axis.Radius = 2.0
+    z_axis.Height = 100.0
+    z_axis.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 50), FreeCAD.Rotation())
+    z_axis.ViewObject.ShapeColor = (0.0, 0.0, 1.0)  # Blue
+    
+    # Create a ground plane indicator at z=-750 (typical table height)
+    ground = FreeCAD.ActiveDocument.addObject("Part::Box", "GroundPlane")
+    ground.Length = 1000.0
+    ground.Width = 1000.0
+    ground.Height = 1.0
+    ground.Placement = FreeCAD.Placement(FreeCAD.Vector(-500, -500, -750), FreeCAD.Rotation())
+    ground.ViewObject.ShapeColor = (0.8, 0.8, 0.8)  # Light gray
+    ground.ViewObject.Transparency = 80
+
+# Add coordinate system indicators
+add_coordinate_system()
+"""
+            user_prompt += "\n\nAlso add this visual debug code at the end of your implementation:\n" + visual_debug_code
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=60  # Increased timeout
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            code = result["choices"][0]["message"]["content"]
+            
+            # Remove markdown code blocks if present
+            if code.startswith("```python"):
+                code = code.replace("```python", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+            
+            return code.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Request error details: {str(e)}")
+            raise
+    
+    def preprocess_code(self, code: str) -> str:
+        """Pre-process code to fix common issues before execution"""
+        # Fix inconsistent FreeCAD/App naming
+        code = code.replace("App.Placement", "FreeCAD.Placement")
+        code = code.replace("App.Vector", "FreeCAD.Vector")
+        code = code.replace("App.Rotation", "FreeCAD.Rotation")
+        code = code.replace("App.ActiveDocument", "FreeCAD.ActiveDocument")
+        
+        # Make sure proper imports are present
+        if "import FreeCAD" not in code:
+            code = "import FreeCAD\n" + code
+        if "import FreeCADGui" not in code and "import Gui" not in code:
+            code = "import FreeCADGui as Gui\n" + code
+        if "import Part" not in code:
+            code = "import Part\n" + code
+            
+        return code
+    
+    def execute_code(self, code: str) -> tuple:
+        try:
+            # Pre-process code to fix common issues
+            code = self.preprocess_code(code)
+            
+            # If code contains positioning errors for certain object types, try to fix them
+            code = self.fix_positioning_issues(code)
+            
+            # Create a new document if none exists
+            if App.ActiveDocument is None:
+                App.newDocument("GroqGenerated")
+            
+            # Execute the code
+            exec(code)
+            
+            # Recompute the document
+            App.ActiveDocument.recompute()
+            Gui.SendMsgToActiveView("ViewFit")
+            
+            return True, "Model created successfully"
+        except Exception as e:
+            return False, f"Failed to execute code: {str(e)}"
+            
+    def fix_positioning_issues(self, code: str) -> str:
+        """Fix common positioning issues in generated code"""
+        # First, determine what type of object the code is creating
+        object_type = self.detect_object_in_code(code)
+        
+        if "table" in object_type:
+            return self.fix_table_positioning(code)
+        elif "chair" in object_type:
+            return self.fix_chair_positioning(code)
+        elif "shelf" in object_type:
+            return self.fix_shelf_positioning(code)
+        
+        # For other object types, return original code
+        return code
+        
+    def detect_object_in_code(self, code: str) -> str:
+        """Detect what type of object the code is creating"""
+        code_lower = code.lower()
+        
+        if "tabletop" in code_lower or "table_top" in code_lower or "table top" in code_lower:
+            return "table"
+        elif "seat" in code_lower and "leg" in code_lower and "back" in code_lower:
+            return "chair"
+        elif "bookshelf" in code_lower or "shelf" in code_lower:
+            return "shelf"
+        
+        return "unknown"
+        
+    def fix_table_positioning(self, code: str) -> str:
+        """Fix positioning issues in table code"""
+        # Look for table top object creation and dimensions
+        table_top_obj_match = re.search(r'(\w+)\s*=\s*.*addObject\(.*["\'](?:TableTop|Table_Top|Table)["\'].*\)', code)
+        
+        if not table_top_obj_match:
+            return code
+            
+        table_top_name = table_top_obj_match.group(1)
+            
+        # Find table top dimensions
+        length_match = re.search(rf'{table_top_name}\.Length\s*=\s*([0-9.]+)', code)
+        width_match = re.search(rf'{table_top_name}\.Width\s*=\s*([0-9.]+)', code)
+        height_match = re.search(rf'{table_top_name}\.Height\s*=\s*([0-9.]+)', code)
+        
+        # Get dimensions if found
+        length = float(length_match.group(1)) if length_match else 1200.0
+        width = float(width_match.group(1)) if width_match else 800.0
+        height = float(height_match.group(1)) if height_match else 30.0
+        
+        # Check for table top placement
+        table_placement_regex = rf'{table_top_name}\.Placement\s*=\s*FreeCAD\.Placement\(FreeCAD\.Vector\(([^,]+),\s*([^,]+),\s*([^)]+)\)(.*)\)'
+        table_placement_match = re.search(table_placement_regex, code)
+        
+        if table_placement_match:
+            x_coord = table_placement_match.group(1).strip()
+            y_coord = table_placement_match.group(2).strip()
+            z_coord = table_placement_match.group(3).strip()
+            rotation = table_placement_match.group(4).strip()
+            
+            # Check if it's using (0,0,0) or similar improper positioning
+            try:
+                # Try to evaluate the coordinates as expressions
+                x_val = eval(x_coord)
+                y_val = eval(y_coord)
+                
+                # If coordinates are near zero or positive, they're likely incorrect
+                if abs(x_val) < 1.0 or x_val > 0 or abs(y_val) < 1.0 or y_val > 0:
+                    # Create proper negative half-dimension placement
+                    half_length = length / 2
+                    half_width = width / 2
+                    
+                    # Construct corrected placement
+                    new_placement = f"{table_top_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{half_length}, -{half_width}, {z_coord}){rotation})"
+                    
+                    # Replace the incorrect placement
+                    code = re.sub(table_placement_regex, new_placement, code)
+                    self.output_log.append(f"Fixed table top placement from ({x_coord}, {y_coord}, {z_coord}) to (-{half_length}, -{half_width}, {z_coord})")
+            except Exception as e:
+                # If we can't evaluate the expressions, skip the fix
+                self.output_log.append(f"Could not evaluate table placement coordinates: {str(e)}")
+        else:
+            # If no placement found, add one with proper coordinates
+            after_height_pattern = rf'{table_top_name}\.Height\s*=\s*[0-9.]+\n'
+            after_height_match = re.search(after_height_pattern, code)
+            
+            if after_height_match:
+                # Construct placement with proper coordinates
+                placement_code = f"{table_top_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{length/2}, -{width/2}, 0), FreeCAD.Rotation())\n"
+                
+                # Insert after the height setting
+                insertion_point = after_height_match.end()
+                code = code[:insertion_point] + placement_code + code[insertion_point:]
+                self.output_log.append(f"Added missing table top placement with coordinates (-{length/2}, -{width/2}, 0)")
+        
+        # Look for leg positioning and fix if needed
+        leg_pattern = r'(\w+)\s*=\s*.*addObject\(.*["\'](?:Leg\d*)["\'].*\)'
+        leg_matches = list(re.finditer(leg_pattern, code))
+        
+        for i, match in enumerate(leg_matches):
+            leg_name = match.group(1)
+            
+            # Find leg dimensions
+            leg_width_match = re.search(rf'{leg_name}\.(?:Width|Length)\s*=\s*([0-9.]+)', code)
+            leg_width = float(leg_width_match.group(1)) if leg_width_match else 50.0
+            
+            # Find leg placement
+            leg_placement_regex = rf'{leg_name}\.Placement\s*=\s*FreeCAD\.Placement\(FreeCAD\.Vector\(([^,]+),\s*([^,]+),\s*([^)]+)\)(.*)\)'
+            leg_placement_match = re.search(leg_placement_regex, code)
+            
+            if leg_placement_match:
+                x_coord = leg_placement_match.group(1).strip()
+                y_coord = leg_placement_match.group(2).strip()
+                z_coord = leg_placement_match.group(3).strip()
+                rotation = leg_placement_match.group(4).strip()
+                
+                # Check if z-coordinate is incorrect (should be negative for legs)
+                try:
+                    z_val = eval(z_coord)
+                    
+                    # If z is zero or positive, it's probably wrong
+                    if z_val >= 0 and "table_height" not in z_coord and "leg_height" not in z_coord:
+                        # Assume standard table height if not specified
+                        table_height = 750.0
+                        # Use the negative table height
+                        new_z_coord = "-" + str(table_height)
+                        
+                        # Construct corrected placement
+                        new_placement = f"{leg_name}.Placement = FreeCAD.Placement(FreeCAD.Vector({x_coord}, {y_coord}, {new_z_coord}){rotation})"
+                        
+                        # Replace the incorrect placement
+                        code = re.sub(leg_placement_regex, new_placement, code)
+                        self.output_log.append(f"Fixed leg {i+1} z-coordinate from {z_coord} to {new_z_coord}")
+                except Exception as e:
+                    # If we can't evaluate the z-coordinate, skip the fix
+                    self.output_log.append(f"Could not evaluate leg z-coordinate: {str(e)}")
+        
+        return code
+        
+    def fix_chair_positioning(self, code: str) -> str:
+        """Fix positioning issues in chair code"""
+        # Look for seat object creation and dimensions
+        seat_obj_match = re.search(r'(\w+)\s*=\s*.*addObject\(.*["\'](?:Seat|Chair_Seat)["\'].*\)', code)
+        
+        if not seat_obj_match:
+            return code
+            
+        seat_name = seat_obj_match.group(1)
+            
+        # Find seat dimensions
+        length_match = re.search(rf'{seat_name}\.Length\s*=\s*([0-9.]+)', code)
+        width_match = re.search(rf'{seat_name}\.Width\s*=\s*([0-9.]+)', code)
+        height_match = re.search(rf'{seat_name}\.Height\s*=\s*([0-9.]+)', code)
+        
+        # Get dimensions if found
+        length = float(length_match.group(1)) if length_match else 500.0
+        width = float(width_match.group(1)) if width_match else 500.0
+        height = float(height_match.group(1)) if height_match else 30.0
+        
+        # Check for seat placement
+        seat_placement_regex = rf'{seat_name}\.Placement\s*=\s*FreeCAD\.Placement\(FreeCAD\.Vector\(([^,]+),\s*([^,]+),\s*([^)]+)\)(.*)\)'
+        seat_placement_match = re.search(seat_placement_regex, code)
+        
+        if seat_placement_match:
+            x_coord = seat_placement_match.group(1).strip()
+            y_coord = seat_placement_match.group(2).strip()
+            z_coord = seat_placement_match.group(3).strip()
+            rotation = seat_placement_match.group(4).strip()
+            
+            # Check if it's using (0,0,0) or similar improper positioning
+            try:
+                # Try to evaluate the coordinates as expressions
+                x_val = eval(x_coord)
+                y_val = eval(y_coord)
+                
+                # If coordinates are near zero or positive, they're likely incorrect
+                if abs(x_val) < 1.0 or x_val > 0 or abs(y_val) < 1.0 or y_val > 0:
+                    # Create proper negative half-dimension placement
+                    half_length = length / 2
+                    half_width = width / 2
+                    
+                    # Construct corrected placement
+                    new_placement = f"{seat_name}.Placement = FreeCAD.Placement(FreeCAD.Vector(-{half_length}, -{half_width}, {z_coord}){rotation})"
+                    
+                    # Replace the incorrect placement
+                    code = re.sub(seat_placement_regex, new_placement, code)
+                    self.output_log.append(f"Fixed seat placement from ({x_coord}, {y_coord}, {z_coord}) to (-{half_length}, -{half_width}, {z_coord})")
+            except Exception as e:
+                # If we can't evaluate the expressions, skip the fix
+                self.output_log.append(f"Could not evaluate seat placement coordinates: {str(e)}")
+                
+        # Similar checks and fixes for backrest and legs would go here
+        
+        return code
+        
+    def fix_shelf_positioning(self, code: str) -> str:
+        """Fix positioning issues in shelf code"""
+        # Implementation would be similar to the table and chair methods
+        # This method would fix positioning issues specific to shelves
+        return code
+
+    def execute_code_with_debug(self, code: str, object_type: str, user_params: dict = None, 
+                               spatial_reasoning: str = None, component_plan: str = None) -> tuple:
+        """Execute code with debugging and error feedback"""
+        # Store original code for reference
+        original_code = code
+        
+        # Pre-process code to fix common issues
+        code = self.preprocess_code(code)
+        
+        # Fix positioning issues
+        code = self.fix_positioning_issues(code)
+        
+        # Initialize debug information
+        debug_info = {
+            "attempt": 0,
+            "errors": [],
+            "object_state": [],
+            "execution_log": []
+        }
+        
+        max_attempts = 3  # Maximum number of retry attempts
+        
+        for attempt in range(max_attempts):
+            debug_info["attempt"] = attempt + 1
+            
+            try:
+                # Prepare execution environment
+                if App.ActiveDocument is None:
+                    App.newDocument("GroqGenerated")
+                elif attempt > 0:  # Clear previous attempt if this is a retry
+                    doc_name = App.ActiveDocument.Name
+                    App.closeDocument(doc_name)
+                    App.newDocument("GroqGenerated")
+                
+                # Create execution tracking
+                execution_log = []
+                
+                try:
+                    # First try executing the entire code at once
+                    execution_log.append("Executing complete code...")
+                    exec(code)
+                    execution_log.append("Code executed successfully in one pass")
+                except Exception as e:
+                    # If that fails, try line-by-line execution
+                    execution_log.append(f"Full execution failed: {type(e).__name__}: {str(e)}")
+                    execution_log.append("Attempting line-by-line execution...")
+                    
+                    # Split code into lines for line-by-line execution
+                    code_lines = code.split('\n')
+                    line_num = 0
+                    
+                    # Execute code line by line
+                    while line_num < len(code_lines):
+                        current_line = code_lines[line_num].strip()
+                        
+                        # Skip empty lines and comments
+                        if not current_line or current_line.startswith('#'):
+                            line_num += 1
+                            continue
+                        
+                        # Find complete statements (handling multi-line statements)
+                        statement = current_line
+                        while not self.is_complete_statement(statement) and line_num < len(code_lines) - 1:
+                            line_num += 1
+                            statement += '\n' + code_lines[line_num].strip()
+                        
+                        # Log the statement being executed
+                        execution_log.append(f"Executing: {statement}")
+                        
+                        try:
+                            # Execute the individual statement
+                            exec(statement)
+                            
+                            # Capture object state after significant operations
+                            if any(keyword in statement for keyword in ['makeBox', 'makeCylinder', 'extrude', 'cut', 'fuse']):
+                                self.capture_object_state(debug_info)
+                            
+                        except Exception as e:
+                            # Capture the specific error
+                            error_info = {
+                                "line_num": line_num + 1,
+                                "code": statement,
+                                "error_type": type(e).__name__,
+                                "error_msg": str(e),
+                                "traceback": traceback.format_exc()
+                            }
+                            debug_info["errors"].append(error_info)
+                            
+                            # Log error
+                            execution_log.append(f"Error at line {line_num + 1}: {type(e).__name__}: {str(e)}")
+                            
+                            # Break execution at first error
+                            break
+                        
+                        line_num += 1
+                    
+                    line_num += 1
+                
+                # Store execution log
+                debug_info["execution_log"] = execution_log
+                
+                # If we got here without breaking, execution was successful
+                if not debug_info["errors"]:
+                    # Final recompute
+                    App.ActiveDocument.recompute()
+                    Gui.SendMsgToActiveView("ViewFit")
+                    return True, "Model created successfully"
+                
+                # If we had errors, try to fix them
+                if attempt < max_attempts - 1:  # Don't try to fix on the last attempt
+                    # Send debug info to Groq for correction
+                    code = self.get_fixed_code_from_groq(
+                        original_code, debug_info, object_type, 
+                        user_params, spatial_reasoning, component_plan
+                    )
+                    
+                    # Clear errors for next attempt
+                    debug_info["errors"] = []
+                
+            except Exception as e:
+                # Catch any other exceptions
+                debug_info["errors"].append({
+                    "error_type": type(e).__name__,
+                    "error_msg": str(e),
+                    "traceback": traceback.format_exc()
+                })
+        
+        # If we got here, all attempts failed
+        error_summary = self.format_debug_info(debug_info)
+        return False, f"Failed to create model after {max_attempts} attempts.\n\n{error_summary}"
+
+    def is_complete_statement(self, code: str) -> bool:
+        """Check if a code snippet is a complete Python statement"""
+        try:
+            compile(code, '<string>', 'exec')
+            return True
+        except SyntaxError as e:
+            if 'unexpected EOF' in str(e):
+                return False
+            return True  # Other syntax errors mean it's complete but invalid
+            
+    def closeEvent(self, event):
+        """Handle the dialog close event properly"""
+        # Clean up reference to prevent memory leaks
+        global _cad_dialog_instance
+        _cad_dialog_instance = None
+        event.accept()
+
+    def capture_object_state(self, debug_info: dict):
+        """Capture the current state of objects in the document"""
+        if not App.ActiveDocument:
+            return
+        
+        import time
+        objects_info = []
+        for obj in App.ActiveDocument.Objects:
+            try:
+                obj_info = {
+                    "name": obj.Name,
+                    "type": obj.TypeId,
+                    "valid": obj.isValid()
+                }
+                
+                # Capture additional properties based on object type
+                if hasattr(obj, "Shape"):
+                    obj_info["has_shape"] = True
+                    if obj.Shape:
+                        obj_info["shape_valid"] = obj.Shape.isValid()
+                        obj_info["shape_type"] = obj.Shape.ShapeType
+                        
+                        # Capture bounding box for position analysis
+                        bb = obj.Shape.BoundBox
+                        obj_info["bbox"] = {
+                            "XMin": bb.XMin, "XMax": bb.XMax,
+                            "YMin": bb.YMin, "YMax": bb.YMax,
+                            "ZMin": bb.ZMin, "ZMax": bb.ZMax,
+                            "Center": [(bb.XMin + bb.XMax)/2, (bb.YMin + bb.YMax)/2, (bb.ZMin + bb.ZMax)/2]
+                        }
+                    else:
+                        obj_info["has_shape"] = False
+                
+                objects_info.append(obj_info)
+            except:
+                # Skip objects that cause errors when examined
+                pass
+        
+        debug_info["object_state"].append({
+            "timestamp": time.time(),
+            "objects": objects_info
+        })
+
+    def get_fixed_code_from_groq(self, original_code: str, debug_info: dict, object_type: str,
+                                user_params: dict = None, spatial_reasoning: str = None, component_plan: str = None) -> str:
+        """Send debug info to Groq and get fixed code"""
+        # Format debug info for Groq
+        error_context = self.format_debug_info(debug_info)
+        
+        # Format user parameters if available
+        user_params_text = ""
+        if user_params and len(user_params) > 0:
+            user_params_text = "USER PARAMETERS:\n"
+            for name, value in user_params.items():
+                user_params_text += f"- {name}: {value}\n"
+                
+        # Include spatial reasoning if available
+        spatial_reasoning_text = ""
+        if spatial_reasoning:
+            spatial_reasoning_text = f"""SPATIAL REASONING:
+{spatial_reasoning}"""
+        
+        # Include component plan if available
+        component_plan_text = ""
+        if component_plan:
+            component_plan_text = f"""COMPONENT PLAN:
+{component_plan}"""
+        
+        # Object-specific positioning instructions
+        object_specific = ""
+        if object_type == "table":
+            object_specific = """
+VERY IMPORTANT POSITIONING REQUIREMENTS:
+1. Table top must be positioned with its bottom face at z=0
+2. CRITICAL: Place table top using CORNER coordinates, not center coordinates
+   - For a table with dimensions Length × Width, use:
+   - table_top.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
+3. Legs must extend downward from z=0 (they must connect to the bottom of the table top)
+4. Legs must be positioned at the corners of the table
+5. All positions must use ABSOLUTE coordinates (not relative/incremental)"""
+        elif object_type == "chair":
+            object_specific = """
+VERY IMPORTANT POSITIONING REQUIREMENTS:
+1. Seat must be positioned with its bottom face at z=0
+2. CRITICAL: Place seat using CORNER coordinates, not center coordinates
+   - For a seat with dimensions Length × Width, use:
+   - seat.Placement = FreeCAD.Placement(FreeCAD.Vector(-Length/2, -Width/2, 0), FreeCAD.Rotation())
+3. Legs must extend downward from z=0 (they must connect to the bottom of the seat)
+4. Backrest must connect to the back edge of the seat and extend upward
+5. All positions must use ABSOLUTE coordinates (not relative/incremental)"""
+        
+        # Create prompt for Groq
+        prompt = f"""I tried to create a FreeCAD model with the following Python code, but encountered errors:
+
+ORIGINAL CODE:
+```python
+{original_code}
+```
+
+{user_params_text}
+{spatial_reasoning_text}
+{component_plan_text}
+{object_specific}
+
+EXECUTION DETAILS:
+{error_context}
+
+Please fix the code to resolve these errors. Return only the complete corrected code with no explanations or markdown formatting.
+
+CRITICAL FIXES NEEDED:
+1. Fix ALL execution errors shown above
+2. ALWAYS use 'FreeCAD' instead of 'App' throughout the code
+3. For placements, use FreeCAD.Placement, FreeCAD.Vector, and FreeCAD.Rotation
+4. Fix any indentation issues, especially in conditional blocks
+5. Ensure all imports are present: import FreeCAD, import FreeCADGui, import Part
+6. MOST IMPORTANT: Fix component positioning - remember that in FreeCAD:
+   - Box placement coordinates are for the CORNER, not center
+   - To place a box centered at origin, use negative half-dimensions
+   - For a box with Length=1200, Width=800, use Placement(-600, -400, 0)
+7. Ensure components maintain logical real-world relationships
+8. For furniture, ensure supporting elements (legs) properly connect to main elements
+9. Maintain the coordinate system where origin (0,0,0) is at the center of the bottom face of the main component
+10. Use clear variable names and well-structured code
+11. Include the validation and visual debug code if it was in the original
+
+Pay special attention to component positioning and ensure all parts are logically placed."""
+
+        # Send to Groq
+        fixed_code = self.send_to_groq(prompt)
+        
+        # Log the correction attempt
+        self.output_log.append(f"Attempt {debug_info['attempt']} failed. Trying with corrected code...")
+        
+        return fixed_code
+
+    def format_debug_info(self, debug_info: dict) -> str:
+        """Format debug info into a readable string for UI display and Groq input"""
+        result = []
+        
+        # Add error information
+        if debug_info["errors"]:
+            result.append("ERRORS:")
+            for i, error in enumerate(debug_info["errors"]):
+                result.append(f"Error {i+1}:")
+                if "line_num" in error:
+                    result.append(f"- Line number: {error['line_num']}")
+                if "code" in error:
+                    result.append(f"- Code: {error['code']}")
+                result.append(f"- Type: {error['error_type']}")
+                result.append(f"- Message: {error['error_msg']}")
+                # Include only the relevant parts of the traceback
+                if "traceback" in error:
+                    tb_lines = error["traceback"].split("\n")
+                    filtered_tb = [l for l in tb_lines if "File" in l and "<string>" in l]
+                    if filtered_tb:
+                        result.append("- Traceback:")
+                        result.extend([f"  {l}" for l in filtered_tb])
+                result.append("")
+        
+        # Add execution log (last 10 entries to keep it manageable)
+        if debug_info["execution_log"]:
+            result.append("EXECUTION LOG (last 10 operations):")
+            for log in debug_info["execution_log"][-10:]:
+                result.append(f"- {log}")
+            result.append("")
+        
+        # Add object state info from the last capture
+        if debug_info["object_state"]:
+            last_state = debug_info["object_state"][-1]
+            result.append("OBJECT STATE:")
+            for obj in last_state["objects"]:
+                obj_status = "Valid" if obj.get("valid", False) else "Invalid"
+                result.append(f"- {obj['name']} ({obj['type']}): {obj_status}")
+                
+                if "has_shape" in obj:
+                    if obj["has_shape"]:
+                        shape_status = "Valid" if obj.get("shape_valid", False) else "Invalid"
+                        result.append(f"  Shape: {obj.get('shape_type', 'Unknown')} ({shape_status})")
+                        
+                        # Include bounding box info if available
+                        if "bbox" in obj:
+                            bb = obj["bbox"]
+                            result.append(f"  Position: Center at ({bb['Center'][0]:.1f}, {bb['Center'][1]:.1f}, {bb['Center'][2]:.1f})")
+                            result.append(f"  Z Range: {bb['ZMin']:.1f} to {bb['ZMax']:.1f}")
+                    else:
+                        result.append(f"  Shape: None")
+        
+        return "\n".join(result)
+
+    def send_to_groq(self, prompt: str) -> str:
+        """Send a prompt to the Groq API and get a response"""
+        # Sanitize API key - remove any whitespace, newlines or carriage returns
+        api_key = self.api_key_input.text().strip()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        model = self.model_selector.currentText()
+        
+        data = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a CAD code debugging assistant. Fix FreeCAD Python code based on error information."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 4000
+        }
+        
+        try:
+            # Setting verify=False to bypass SSL verification - use with caution
+            response = requests.post(
+                API_ENDPOINT,
+                headers=headers,
+                json=data,
+                verify=False,
+                timeout=60  # Increased timeout
+            )
+            
+            if response.status_code != 200:
+                self.output_log.append(f"API Response Status: {response.status_code}")
+                self.output_log.append(f"API Response Content: {response.text}")
+                raise Exception(f"API error: {response.text}")
+            
+            result = response.json()
+            code = result["choices"][0]["message"]["content"]
+            
+            # Remove markdown code blocks if present
+            if code.startswith("```python"):
+                code = code.replace("```python", "", 1)
+                if code.endswith("```"):
+                    code = code[:-3]
+            
+            return code.strip()
+            
+        except Exception as e:
+            self.output_log.append(f"Request error details: {str(e)}")
+            raise
+
+# Create and show the dialog as non-modal
+_cad_dialog_instance = LLMToCADDialog()
+_cad_dialog_instance.show()
