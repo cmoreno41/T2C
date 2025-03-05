@@ -1,111 +1,203 @@
-import FreeCAD
-import FreeCADGui
+import FreeCAD as App
+import FreeCADGui as Gui
+from PySide import QtGui, QtCore
+import json
+import traceback
 import urllib.request
 import urllib.parse
-import json
 import os
-import traceback
 
-def prompt_gemini(prompt_text, api_key, model_name="gemini-1.5-pro-002"):
-    """
-    Prompts the Gemini API using urllib and returns the response text.
+class LLMToCADDialog(QtGui.QDialog):
+    def __init__(self):
+        super(LLMToCADDialog, self).__init__()
+        self.setWindowTitle("Gemini to CAD Generator")
+        self.resize(600, 500)
+        self.setup_ui()
 
-    Args:
-        prompt_text: The text prompt to send to the Gemini API.
-        api_key: Your Google Cloud API key.
-        model_name: The name of the Gemini model to use.
+    def setup_ui(self):
+        # Main layout
+        layout = QtGui.QVBoxLayout(self)
 
-    Returns:
-        The generated text from the Gemini API, or None if an error occurred.
-    """
+        # API Key section
+        api_layout = QtGui.QHBoxLayout()
+        api_layout.addWidget(QtGui.QLabel("Google Cloud API Key:"))
+        self.api_key_input = QtGui.QLineEdit()
+        self.api_key_input.setEchoMode(QtGui.QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("Enter your Google Cloud API key")
+        api_layout.addWidget(self.api_key_input)
+        layout.addLayout(api_layout)
 
-    api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        # Model selection (Simplified for Gemini)
+        model_layout = QtGui.QHBoxLayout()
+        model_layout.addWidget(QtGui.QLabel("Gemini Model:"))
+        self.model_selector = QtGui.QComboBox()
+        self.model_selector.addItems([
+            "gemini-1.5-pro-002",
+            "gemini-1.0-pro",
+            "gemini-1.0-pro-001" #Add other models if needed
+        ])
+        self.model_selector.setCurrentIndex(0) # Default to a good model
+        model_layout.addWidget(self.model_selector)
+        layout.addLayout(model_layout)
 
-    request_data = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt_text}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.7,  # Adjust as needed
-            "maxOutputTokens": 200, # and these
-        }
-    }
 
-    request_body = json.dumps(request_data).encode("utf-8")
+        # Description section
+        layout.addWidget(QtGui.QLabel("CAD Description:"))
+        self.description_input = QtGui.QTextEdit()
+        self.description_input.setPlaceholderText("Describe what you want to create in detail...")
+        layout.addWidget(self.description_input)
 
-    req = urllib.request.Request(
-        api_endpoint,
-        data=request_body,
-        headers={"Content-Type": "application/json"},
-    )
+        # Buttons
+        button_layout = QtGui.QHBoxLayout()
+        self.generate_button = QtGui.QPushButton("Generate CAD Model")
+        self.generate_button.clicked.connect(self.generate_model)
+        button_layout.addWidget(self.generate_button)
 
-    try:
-        with urllib.request.urlopen(req) as response:
-            response_body = response.read().decode("utf-8")
-            response_data = json.loads(response_body)
+        self.close_button = QtGui.QPushButton("Close")
+        self.close_button.clicked.connect(self.reject)
+        button_layout.addWidget(self.close_button)
+        layout.addLayout(button_layout)
 
-            if "candidates" in response_data and response_data["candidates"]:
-                return response_data["candidates"][0]["content"]["parts"][0]["text"]
+        # Output log
+        layout.addWidget(QtGui.QLabel("Output:"))
+        self.output_log = QtGui.QTextEdit()
+        self.output_log.setReadOnly(True)
+        layout.addWidget(self.output_log)
+
+    def generate_model(self):
+        api_key = self.api_key_input.text().strip()
+        description = self.description_input.toPlainText().strip()
+        model_name = self.model_selector.currentText() # Get selected model
+
+        if not api_key:
+            self.output_log.append("Error: API key is required\n")
+            return
+
+        if not description:
+            self.output_log.append("Error: Please provide a description\n")
+            return
+
+        try:
+            self.output_log.append("Sending request to Gemini...\n")
+            code = self.get_code_from_gemini(api_key, description, model_name)
+
+            if code:
+                self.output_log.append("Code generated. Executing in FreeCAD...\n")
+                success, message = self.execute_code(code)
+                if success:
+                    self.output_log.append("Success: " + message + "\n")
+                else:
+                    self.output_log.append("Error: " + message + "\n")
+                    self.output_log.append("Generated code:\n")
+                    self.output_log.append(code + "\n")
             else:
-                FreeCAD.Console.PrintError("No text generated in response.\n")
-                FreeCAD.Console.PrintError(json.dumps(response_data, indent=2)+"\n") # Dump full response for debugging
-                return None
-
-    except urllib.error.HTTPError as e:
-        FreeCAD.Console.PrintError(f"HTTP Error: {e.code} {e.reason}\n")
-        try:  # Attempt to read the error response body
-            error_body = e.read().decode("utf-8")
-            error_data = json.loads(error_body)
-            FreeCAD.Console.PrintError(json.dumps(error_data, indent=2) + "\n")
-        except Exception:
-            FreeCAD.Console.PrintError("Could not read error response body.\n")
-        traceback.print_exc() # Always print the full traceback!
-        return None
-    except urllib.error.URLError as e:
-        FreeCAD.Console.PrintError(f"URL Error: {e.reason}\n")
-        traceback.print_exc()
-        return None
-    except Exception as e:
-        FreeCAD.Console.PrintError(f"An unexpected error occurred: {e}\n")
-        traceback.print_exc()
-        return None
+                self.output_log.append("Failed to generate code from Gemini\n")
+        except Exception as e:
+            self.output_log.append(f"Error: {str(e)}\n")
+            self.output_log.append(traceback.format_exc() + "\n")
 
 
+    def get_code_from_gemini(self, api_key: str, description: str, model_name: str) -> str:
+        """Gets FreeCAD Python code from the Gemini API using urllib."""
 
-def run_gemini_test():
-    """
-    Tests the Gemini API interaction by sending a simple prompt
-    and printing the response to the FreeCAD console.
-    """
+        api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
-    # --- 1. Get the API Key (from environment variable) ---
-    api_key = 'AIzaSyB24UU8Ut7BdU-Ho0DVXfnZfw8diwk8v-c'
-    if not api_key:
-        FreeCAD.Console.PrintError("Error: GOOGLE_API_KEY environment variable not set.\n")
-        return
+        system_prompt = """You are a CAD assistant that converts descriptions into FreeCAD Python code.
+Return ONLY executable Python code with no explanations or markdown formatting.
+The code should create the specified 3D model in FreeCAD."""
 
-    # --- 2. Define a Test Prompt ---
-    test_prompt = "What is the capital of France?"
+        user_prompt = f"""Create FreeCAD Python code for: {description}
 
-    # --- 3. Call the prompt_gemini function ---
-    response_text = prompt_gemini(test_prompt, api_key)
+The code must:
+1. Import necessary FreeCAD modules
+2. Create a new document if needed
+3. Create the 3D geometry described
+4. Use parametric modeling when appropriate
+5. Set reasonable dimensions if not specified
+6. Add proper colors and appearance
+7. Be complete and ready to execute
 
-    # --- 4. Print the Response ---
-    if response_text:
-        FreeCAD.Console.PrintMessage("Gemini API Response:\n")
-        FreeCAD.Console.PrintMessage(response_text + "\n")
-    else:
-        FreeCAD.Console.PrintError("Gemini API call failed.\n")
+Return only the Python code with no explanations or markdown."""
 
-# --- How to Run in FreeCAD ---
-# 1. Open FreeCAD.
-# 2. View -> Panels -> Python console.
-# 3. Copy and paste this ENTIRE script.
-# 4. Ensure the GOOGLE_API_KEY environment variable is set *before* running FreeCAD.
-# 5. Press Enter.
+        request_data = {
+            "contents": [            
+				{"role": "user", "parts": [{"text": system_prompt +' \n' + user_prompt}]}
+            ],
+            "generationConfig": {
+                "temperature": 0.3,  # Keep temperature low for more deterministic code
+                "maxOutputTokens": 6000, #Allow longer code output.
+            }
+        }
 
-# Run the test function:
-run_gemini_test()
+        response_data = self.send_request_to_gemini(api_endpoint, request_data)
+        if not response_data: return "" # Handle failed requests
+
+        if response_data and "candidates" in response_data and response_data["candidates"]:
+            code = response_data["candidates"][0]["content"]["parts"][0]["text"]
+            code = code.replace("```python", "").replace("```", "").strip()  # Remove markdown
+            return code
+        else:
+            self.output_log.append("Failed to get code from Gemini.\n")
+            if response_data: #Check for a response before trying to log.
+                self.output_log.append(json.dumps(response_data, indent=2)) #Log full response.
+            return ""
+
+
+    def send_request_to_gemini(self, api_endpoint, request_data):
+        """Sends a request to the Gemini API using urllib (no external libraries)."""
+        request_body = json.dumps(request_data).encode("utf-8")
+        req = urllib.request.Request(
+            api_endpoint,
+            data=request_body,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req) as response:
+                response_body = response.read().decode("utf-8")
+                return json.loads(response_body)
+        except urllib.error.HTTPError as e:
+            self.output_log.append(f"HTTP Error: {e.code} {e.reason}\n")
+            try:
+                error_body = e.read().decode("utf-8")
+                error_data = json.loads(error_body)
+                self.output_log.append(json.dumps(error_data, indent=2) + "\n") #Pretty print JSON
+            except Exception:
+                self.output_log.append("Could not read error response body.\n")
+            traceback.print_exc() # Always print the full traceback!
+            return None
+        except urllib.error.URLError as e:
+            self.output_log.append(f"URL Error: {e.reason}\n")
+            traceback.print_exc()
+            return None
+        except Exception as e:
+            self.output_log.append(f"An unexpected error occurred: {e}\n")
+            traceback.print_exc()
+            return None
+
+    def execute_code(self, code: str) -> tuple[bool, str]:
+        try:
+            # Create a new document if none exists
+            if App.ActiveDocument is None:
+                App.newDocument("GeminiGenerated")
+
+            # Execute the code
+            exec(code)
+
+            # Recompute the document
+            App.ActiveDocument.recompute()
+            Gui.SendMsgToActiveView("ViewFit")
+
+            return True, "Model created successfully"
+        except Exception as e:
+            return False, f"Failed to execute code: {str(e)}"
+
+    def closeEvent(self, event):
+        """Handle the dialog close event"""
+        global _cad_dialog_instance
+        _cad_dialog_instance = None  # Clear the global reference
+        event.accept()
+
+
+# Show the dialog when the macro is run
+dialog = LLMToCADDialog()
+dialog.exec_()
